@@ -1,0 +1,31 @@
+{
+  "name": "system-os-danilo-filho",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal performance OS — 90-day longevity experiment",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "dexie": "^4.0.8",
+    "lucide-react": "0.383.0",
+    "next": "14.2.5",
+    "next-pwa": "^5.6.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "2.12.7"
+  },
+  "devDependencies": {
+    "autoprefixer": "10.4.19",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5",
+    "postcss": "8.4.39",
+    "tailwindcss": "3.4.6"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}
