@@ -3,6 +3,7 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { tables, PROTOCOL_SINGLETON_ID, CHECKLIST_SINGLETON_ID } from "@/lib/db";
 import { seedIfEmpty } from "@/lib/seed";
+import { initSync } from "@/lib/sheetsSync";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, Area, AreaChart,
@@ -613,10 +614,12 @@ function useRepository() {
         if (supplementsArr.length) setSupplements(supplementsArr);
         if (weeklyArr.length) setWeeklySummaries(weeklyArr);
         setReady(true);
+        initSync(tables);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[useRepository] hydration failed:", err);
         setReady(true);
+        initSync(tables);
       }
     })();
   }, []);
