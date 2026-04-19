@@ -4,6 +4,8 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 import { tables, PROTOCOL_SINGLETON_ID, CHECKLIST_SINGLETON_ID } from "@/lib/db";
 import { seedIfEmpty } from "@/lib/seed";
 import { initSync } from "@/lib/sheetsSync";
+import { fetchCopilot } from "@/lib/copilotClient";
+import { phraseForDay } from "@/lib/phrases";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, Area, AreaChart,
@@ -1330,6 +1332,57 @@ const d_streak = (entries, predicate) => {
 };
 
 // --------------------------------------------------------------
+// [3.9] Seal / badge system (deterministic)
+// --------------------------------------------------------------
+/**
+ * Predicate: is this day "fully completed" for seal purposes?
+ * Rule: non-optional daily fields all logged + day closed.
+ * Sleep quality is OPTIONAL and does NOT block a seal.
+ * Subjective fields (mood, focus, stress, hunger, cravings, finalEnergy,
+ * notes, energy) are OPTIONAL and do NOT block a seal.
+ */
+const d_isSealedDay = (e) => {
+  if (!e || e.day === 0) return false;
+  if (!e.closed) return false;
+  if (!e.training) return false;
+  if (!e.sauna) return false;
+  if (!e.hbot) return false;
+  if (!e.redLight) return false;
+  if (!e.fiber) return false;
+  if (!e.brazilNuts) return false;
+  if (e.weight == null) return false;
+  if (e.sleepH == null) return false;
+  if (e.recovery == null) return false;
+  if (e.diet == null) return false;
+  if (e.alcohol !== false) return false;
+  return true;
+};
+
+/**
+ * Count total seals earned so far (across the 90 days).
+ * Pre-launch day (day 0) is excluded.
+ */
+const d_countSeals = (entries) => {
+  if (!Array.isArray(entries)) return 0;
+  return entries.filter(d_isSealedDay).length;
+};
+
+/**
+ * Seal streak predicates — pure, composable.
+ * Pass any of these to d_streak(entries, predicate).
+ */
+const d_pred = {
+  sealed: d_isSealedDay,
+  training: (e) => !!e.training,
+  hbot: (e) => !!e.hbot,
+  sauna: (e) => !!e.sauna,
+  redLight: (e) => !!e.redLight,
+  sleepTarget: (protocol) => (e) =>
+    e.sleepH != null && e.sleepH >= (protocol?.sleepTarget ?? 7.5),
+  endOfDayClosed: (e) => !!e.closed,
+};
+
+// --------------------------------------------------------------
 // PUBLIC NAMESPACE
 // --------------------------------------------------------------
 /**
@@ -1368,6 +1421,10 @@ const Deterministic = {
   beforeAfterDeltas: d_beforeAfterDeltas,
   // streaks
   streak: d_streak,
+  // seals / badges
+  isSealedDay: d_isSealedDay,
+  countSeals: d_countSeals,
+  streakPredicates: d_pred,
 };
 
 /* ============================================================
@@ -2458,6 +2515,92 @@ const tagColor = {
 // ============================================================
 // HOME — MISSION CONTROL
 // ============================================================
+// ============================================================
+// HOME — Seals + Streaks subcomponent (premium, não intrusivo)
+// ============================================================
+const HomeSealsStreaks = ({ entries, protocol, today }) => {
+  const SEAL_GOAL = 70;
+  const TOTAL_DAYS = 90;
+
+  const data = useMemo(() => {
+    const sealCount = Deterministic.countSeals(entries);
+    const perfectStreak = Deterministic.streak(entries, Deterministic.streakPredicates.sealed);
+    const trainingStreak = Deterministic.streak(entries, Deterministic.streakPredicates.training);
+    const hbotStreak = Deterministic.streak(entries, Deterministic.streakPredicates.hbot);
+    const saunaStreak = Deterministic.streak(entries, Deterministic.streakPredicates.sauna);
+    const redLightStreak = Deterministic.streak(entries, Deterministic.streakPredicates.redLight);
+    const sleepStreak = Deterministic.streak(entries, Deterministic.streakPredicates.sleepTarget(protocol));
+    const closedStreak = Deterministic.streak(entries, Deterministic.streakPredicates.endOfDayClosed);
+    return {
+      sealCount,
+      perfectStreak,
+      trainingStreak,
+      hbotStreak,
+      saunaStreak,
+      redLightStreak,
+      sleepStreak,
+      closedStreak,
+    };
+  }, [entries, protocol]);
+
+  const pct = Math.min(100, (data.sealCount / SEAL_GOAL) * 100);
+  const onPace = today.day > 0 ? data.sealCount >= Math.round((today.day / TOTAL_DAYS) * SEAL_GOAL) : true;
+
+  const streakChips = [
+    { key: "perfect", label: "Perfect", value: data.perfectStreak, icon: Sparkles, color: "text-emerald-400" },
+    { key: "training", label: "Treino", value: data.trainingStreak, icon: Dumbbell, color: "text-amber-400" },
+    { key: "hbot", label: "HBOT", value: data.hbotStreak, icon: Droplet, color: "text-cyan-400" },
+    { key: "sauna", label: "Sauna", value: data.saunaStreak, icon: Flame, color: "text-orange-400" },
+    { key: "red", label: "RedLight", value: data.redLightStreak, icon: Sun, color: "text-rose-400" },
+    { key: "sleep", label: "Sono", value: data.sleepStreak, icon: Moon, color: "text-indigo-400" },
+    { key: "close", label: "Fechou", value: data.closedStreak, icon: Check, color: "text-zinc-300" },
+  ];
+
+  return (
+    <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-4">
+      {/* Seal progress */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-full bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center">
+            <Bookmark size={13} className="text-emerald-400" />
+          </div>
+          <div>
+            <div className="text-[9px] uppercase tracking-widest text-zinc-500 font-semibold">Selos</div>
+            <div className="text-[15px] font-bold text-white tabular-nums leading-none">
+              {data.sealCount}
+              <span className="text-[11px] text-zinc-500 font-semibold">/{SEAL_GOAL}</span>
+            </div>
+          </div>
+        </div>
+        <div className={`text-[9px] font-semibold uppercase tracking-wider ${onPace ? "text-emerald-400" : "text-amber-400"}`}>
+          {onPace ? "No ritmo" : "Abaixo do ritmo"}
+        </div>
+      </div>
+      <div className="h-1 bg-zinc-900 rounded-full overflow-hidden mb-3">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-emerald-400 transition-all"
+          style={{ width: `${Math.max(pct, 2)}%` }}
+        />
+      </div>
+
+      {/* Streak chips — compact horizontal */}
+      <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 pb-0.5" style={{ scrollbarWidth: "none" }}>
+        {streakChips.map(s => (
+          <div
+            key={s.key}
+            className="flex-shrink-0 flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-1"
+            title={`${s.label}: ${s.value} dia${s.value === 1 ? "" : "s"} seguidos`}
+          >
+            <s.icon size={10} className={s.color} />
+            <span className="text-[10px] font-bold tabular-nums text-white">{s.value}</span>
+            <span className="text-[9px] text-zinc-500 font-semibold">{s.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const HomeScreen = ({ entries, today, protocol, ai, setTab, setTodayField, openAISection }) => {
   const phase = currentPhase();
   const dayLabel = today.day === 0 ? "Dia 0 · Pré-lançamento" : `Dia ${today.day} de 90`;
@@ -2606,6 +2749,22 @@ const HomeScreen = ({ entries, today, protocol, ai, setTab, setTodayField, openA
           </div>
         </div>
       </div>
+
+      {/* PHRASE OF THE DAY — pequena, premium, rotaciona por dia */}
+      <div className="rounded-2xl bg-gradient-to-br from-emerald-500/5 via-zinc-900/60 to-zinc-900/60 border border-emerald-500/15 px-4 py-3">
+        <div className="flex items-center gap-2 mb-1.5">
+          <Sparkles size={10} className="text-emerald-400" />
+          <span className="text-[9px] uppercase tracking-[0.22em] text-emerald-400/80 font-semibold">
+            Frase do dia
+          </span>
+        </div>
+        <p className="text-[13px] leading-snug text-zinc-200 font-medium">
+          {phraseForDay(today.day || 0)}
+        </p>
+      </div>
+
+      {/* SEALS + STREAKS — leve, não intrusivo */}
+      <HomeSealsStreaks entries={entries} protocol={protocol} today={today} />
 
       {/* COMPOSITE SCORES — Energy / Recovery / Metabolic */}
       {ai.ready && (
@@ -3976,6 +4135,346 @@ const TrendsGrid = ({ entries, protocol }) => {
 };
 
 // ============================================================
+// COPILOT TAB — AI-first intelligence hub
+// ------------------------------------------------------------
+// 7 sections, each backed by a live /api/copilot/* endpoint.
+// Deterministic RuleEngine output is used as fallback when AI
+// is unavailable (ok:false or timeout).
+// ============================================================
+const useCopilotSection = (section, context, enabled) => {
+  const [state, setState] = useState({ loading: false, data: null, error: null, source: null });
+  const ctxKey = useMemo(() => JSON.stringify(context || {}), [context]);
+
+  useEffect(() => {
+    if (!enabled) {
+      setState({ loading: false, data: null, error: null, source: null });
+      return;
+    }
+    let cancelled = false;
+    setState(s => ({ ...s, loading: true, error: null }));
+    fetchCopilot(section, context)
+      .then(res => {
+        if (cancelled) return;
+        if (res && res.ok) {
+          setState({ loading: false, data: res.data, error: null, source: "ai" });
+        } else {
+          setState({ loading: false, data: null, error: res?.error || "AI indisponível", source: "fallback" });
+        }
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setState({ loading: false, data: null, error: String(err.message || err), source: "fallback" });
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, ctxKey, enabled]);
+
+  return state;
+};
+
+const CopilotCard = ({ icon: Icon, label, source, children, loading }) => (
+  <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-4">
+    <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center gap-2">
+        <div className="w-7 h-7 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+          <Icon size={13} className="text-emerald-400" />
+        </div>
+        <div className="text-[9px] uppercase tracking-widest text-zinc-400 font-semibold">{label}</div>
+      </div>
+      <div className="flex items-center gap-1.5">
+        {loading && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+        <span className={`text-[8px] uppercase tracking-widest font-semibold ${source === "ai" ? "text-emerald-400" : "text-zinc-500"}`}>
+          {source === "ai" ? "IA" : source === "fallback" ? "Local" : loading ? "…" : "—"}
+        </span>
+      </div>
+    </div>
+    <div className="text-sm text-zinc-200 leading-relaxed">{children}</div>
+  </div>
+);
+
+const CopilotTab = ({ ai, entries, protocol, today }) => {
+  const enabled = ai?.ready === true;
+
+  // Contexts sent to each API (lean payloads — no PII beyond health data already in this repo)
+  const briefCtx = useMemo(() => ({
+    day: today?.day,
+    sleep_hours: today?.sleepH,
+    sleep_quality: today?.sleepQ,
+    recovery: today?.recovery,
+    energy: today?.energy,
+    adherence: ai?.metrics?.compliance,
+    phase: currentPhase(),
+  }), [today, ai]);
+
+  const tomorrowCtx = useMemo(() => ({
+    plan: (ai?.tomorrowPlan || []).slice(0, 3).map(p => ({
+      priority: p.priority, action: p.action, tag: p.tag,
+    })),
+  }), [ai]);
+
+  const rootCauseCtx = useMemo(() => ({
+    metrics: ai?.metrics,
+    compliance: ai?.metrics?.compliance,
+    days_logged: entries?.filter(e => e.closed)?.length ?? 0,
+    scores: ai?.scores ? {
+      energy: ai.scores.energy?.current,
+      recovery: ai.scores.recovery?.current,
+      metabolic: ai.scores.metabolic?.current,
+    } : null,
+  }), [ai, entries]);
+
+  const weeklyCtx = useMemo(() => ({
+    metrics: ai?.metrics,
+    weekEvolution: ai?.weekEvolution,
+  }), [ai]);
+
+  const experimentCtx = useMemo(() => ({
+    compliance: ai?.metrics?.compliance,
+    weak_areas: (ai?.patterns || []).slice(0, 3).map(p => ({ title: p.title, tag: p.tag })),
+    current_supplements: protocol?.supplements?.map?.(s => s.name) || [],
+  }), [ai, protocol]);
+
+  const patternsCtx = useMemo(() => ({
+    patterns: (ai?.patterns || []).map(p => ({ title: p.title, tag: p.tag })),
+  }), [ai]);
+
+  const brief = useCopilotSection("brief", briefCtx, enabled);
+  const tomorrow = useCopilotSection("tomorrow", tomorrowCtx, enabled && (ai?.tomorrowPlan?.length > 0));
+  const rootCause = useCopilotSection("rootCause", rootCauseCtx, enabled);
+  const weekly = useCopilotSection("weekly", weeklyCtx, enabled);
+  const experiment = useCopilotSection("experiment", experimentCtx, enabled);
+  const patterns = useCopilotSection("patterns", patternsCtx, enabled && (ai?.patterns?.length > 0));
+
+  // Deterministic "Next Best Action" — derived locally, no AI call
+  const nextBestAction = useMemo(() => {
+    const plan = ai?.tomorrowPlan || [];
+    if (plan.length > 0) return plan[0];
+    return null;
+  }, [ai]);
+
+  if (!ai?.ready) {
+    return (
+      <div className="space-y-5 pb-28">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.22em] text-emerald-400 font-semibold mb-1">Copilot</div>
+          <div className="text-lg font-bold text-white">Aprendendo seus dados</div>
+        </div>
+        <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-8 text-center">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-4">
+            <Cpu size={24} className="text-emerald-400" />
+          </div>
+          <div className="text-base font-bold text-white mb-2">Faltam {ai?.daysNeeded ?? 3} dia{(ai?.daysNeeded ?? 3) > 1 ? "s" : ""}</div>
+          <div className="text-sm text-zinc-400 leading-relaxed max-w-xs mx-auto">
+            Copilot ativa após <span className="text-emerald-300 font-semibold">3 dias fechados</span>. Continue registrando.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const planItems = tomorrow.data?.actions || (ai.tomorrowPlan || []).slice(0, 3);
+  const drivers = rootCause.data?.drivers || null;
+  const patternItems = patterns.data?.patterns || (ai.patterns || []).slice(0, 3).map(p => ({ title: p.title, tag: p.tag, explanation: p.body || null }));
+  const weeklyData = weekly.data;
+  const experimentData = experiment.data;
+
+  return (
+    <div className="space-y-5 pb-28">
+      {/* Header */}
+      <div>
+        <div className="text-[10px] uppercase tracking-[0.22em] text-emerald-400 font-semibold mb-1">Copilot</div>
+        <div className="text-lg font-bold text-white">Inteligência do dia</div>
+        <div className="text-[11px] text-zinc-500 mt-1">
+          Respostas geradas via IA, com fallback determinístico caso a rede falhe.
+        </div>
+      </div>
+
+      {/* 1) Today Brief */}
+      <CopilotCard icon={Sparkles} label="Today Brief" source={brief.source} loading={brief.loading}>
+        {brief.data?.brief ? (
+          <>
+            <p>{brief.data.brief}</p>
+            {brief.data.tone && (
+              <div className="mt-2 text-[9px] uppercase tracking-widest font-semibold text-zinc-500">
+                Tom: {brief.data.tone}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-zinc-400">
+            {ai.changingNow?.body || "Sem alertas. Mantenha o ritmo e continue registrando."}
+          </p>
+        )}
+      </CopilotCard>
+
+      {/* 2) Next Best Action */}
+      <CopilotCard icon={Target} label="Next Best Action" source="deterministic">
+        {nextBestAction ? (
+          <>
+            <div className="flex items-start gap-2">
+              <span className="text-[10px] uppercase tracking-widest font-bold text-emerald-400 mt-0.5">
+                #{nextBestAction.priority ?? 1}
+              </span>
+              <span className="flex-1">{nextBestAction.action}</span>
+            </div>
+            {nextBestAction.tag && (
+              <div className="mt-2 inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-400">{nextBestAction.tag}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-zinc-400">Nenhuma ação crítica pendente no momento.</p>
+        )}
+      </CopilotCard>
+
+      {/* 3) Tomorrow Plan (enriquecido com IA) */}
+      <CopilotCard icon={Lightbulb} label="Tomorrow Plan" source={tomorrow.source} loading={tomorrow.loading}>
+        {planItems && planItems.length > 0 ? (
+          <ul className="space-y-2.5">
+            {planItems.map((p, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <span className="text-[10px] uppercase tracking-widest font-bold text-emerald-400 mt-0.5 w-4">
+                  #{p.priority ?? i + 1}
+                </span>
+                <div className="flex-1">
+                  <div className="text-[13px] font-semibold text-white">{p.action}</div>
+                  {p.aiRationale && (
+                    <div className="text-[11px] text-zinc-400 mt-0.5">Por quê: {p.aiRationale}</div>
+                  )}
+                  {p.aiPractical && (
+                    <div className="text-[11px] text-zinc-500 mt-0.5">Como: {p.aiPractical}</div>
+                  )}
+                  {p.tag && (
+                    <div className="mt-1.5 inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                      <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-400">{p.tag}</span>
+                    </div>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-zinc-400">Sem plano determinístico disponível ainda.</p>
+        )}
+      </CopilotCard>
+
+      {/* 4) Root Cause Analysis */}
+      <CopilotCard icon={Compass} label="Root Cause" source={rootCause.source} loading={rootCause.loading}>
+        {drivers && drivers.length > 0 ? (
+          <ul className="space-y-3">
+            {drivers.map((d, i) => (
+              <li key={i}>
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[13px] font-semibold text-white">{d.title}</span>
+                  <span className={`text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded-full ${
+                    d.confidence === "alta" ? "bg-emerald-500/10 text-emerald-400" :
+                    d.confidence === "média" ? "bg-amber-500/10 text-amber-400" :
+                    "bg-zinc-800 text-zinc-400"
+                  }`}>{d.confidence}</span>
+                </div>
+                <div className="text-[11px] text-zinc-400 leading-relaxed">{d.body}</div>
+                {d.tag && (
+                  <div className="mt-1.5 inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                    <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-400">{d.tag}</span>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-zinc-400">Dados insuficientes para identificar drivers.</p>
+        )}
+      </CopilotCard>
+
+      {/* 5) Pattern Detection */}
+      <CopilotCard icon={Layers} label="Pattern Detection" source={patterns.source} loading={patterns.loading}>
+        {patternItems && patternItems.length > 0 ? (
+          <ul className="space-y-2.5">
+            {patternItems.map((p, i) => (
+              <li key={i}>
+                <div className="text-[13px] font-semibold text-white">{p.title}</div>
+                {p.explanation && (
+                  <div className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">{p.explanation}</div>
+                )}
+                {p.tag && (
+                  <div className="mt-1 inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                    <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-400">{p.tag}</span>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-zinc-400">Nenhum padrão detectado ainda.</p>
+        )}
+      </CopilotCard>
+
+      {/* 6) Weekly Insight */}
+      <CopilotCard icon={BarChart3} label="Weekly Insight" source={weekly.source} loading={weekly.loading}>
+        {weeklyData ? (
+          <div className="space-y-2">
+            {weeklyData.improved && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-emerald-400 mb-0.5">Melhorou</div>
+                <div className="text-[12px] text-zinc-200">{weeklyData.improved}</div>
+              </div>
+            )}
+            {weeklyData.worsened && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-rose-400 mb-0.5">Piorou</div>
+                <div className="text-[12px] text-zinc-200">{weeklyData.worsened}</div>
+              </div>
+            )}
+            {weeklyData.matters && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-amber-400 mb-0.5">Importa agora</div>
+                <div className="text-[12px] text-zinc-200">{weeklyData.matters}</div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-zinc-400">
+            Compliance semanal: {ai.metrics?.compliance != null ? `${Math.round(ai.metrics.compliance)}%` : "—"}.
+            Continue registrando para obter síntese semanal da IA.
+          </p>
+        )}
+      </CopilotCard>
+
+      {/* 7) Experiment Suggestion */}
+      <CopilotCard icon={FlaskConical} label="Experiment" source={experiment.source} loading={experiment.loading}>
+        {experimentData ? (
+          <div>
+            <div className="text-[14px] font-bold text-white mb-1">{experimentData.title}</div>
+            <div className="text-[12px] text-zinc-300 leading-relaxed mb-2">{experimentData.what}</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                <Clock size={9} className="text-zinc-400" />
+                <span className="text-[10px] font-semibold text-zinc-300 tabular-nums">{experimentData.duration_days} dias</span>
+              </div>
+              {experimentData.tag && (
+                <div className="inline-flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-0.5">
+                  <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-400">{experimentData.tag}</span>
+                </div>
+              )}
+            </div>
+            {experimentData.metric && (
+              <div className="text-[11px] text-zinc-500 mt-2">Medir: {experimentData.metric}</div>
+            )}
+          </div>
+        ) : (
+          <p className="text-zinc-400">Gerando sugestão de experimento…</p>
+        )}
+      </CopilotCard>
+
+      <div className="text-center text-[9px] uppercase tracking-widest text-zinc-600 font-semibold pt-2">
+        Cache local · 6h · fallback determinístico
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
 // INTERVENTIONS SCREEN — registrar mudanças do experimento
 // ============================================================
 const Interventions = ({ interventions, setInterventions, ai }) => {
@@ -4976,6 +5475,7 @@ export default function SystemOS() {
     home: <HomeScreen entries={entries} today={today} protocol={protocol} ai={rules} setTab={setTab} setTodayField={setTodayField} openAISection={openAISection} />,
     check: <Checklist today={today} checklistState={checklistState} setChecklistState={setChecklistStateCompat} protocol={protocol} />,
     log: <Log today={today} protocol={protocol} setTodayField={setTodayField} />,
+    copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today} />,
     ai: <AI ai={rules} entries={entries} protocol={protocol} labs={labs} bodyComp={bodyComp} interventions={interventions} initialSection={aiInitialSection} />,
     profile: <Profile protocol={protocol} setProtocol={updateProtocol} labs={labs} bodyComp={bodyComp}
       supplements={supplements} interventions={interventions} entries={entries} setTab={setTab} />,
@@ -4987,7 +5487,7 @@ export default function SystemOS() {
     { key: "home", label: "Home", icon: Home, layer: "exec" },
     { key: "check", label: "Check", icon: CheckSquare, layer: "exec" },
     { key: "log", label: "Log", icon: Plus, primary: true, layer: "exec" },
-    { key: "ai", label: "AI", icon: Cpu, layer: "intel" },
+    { key: "copilot", label: "Copilot", icon: Sparkles, layer: "intel" },
     { key: "profile", label: "Perfil", icon: User, layer: "body" },
   ];
 
