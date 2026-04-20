@@ -720,13 +720,12 @@ function useRepository() {
       return entry;
     },
     update: (id, patch) => {
-      let updated = null;
-      setEntries((prev) => prev.map((e) => {
-        if (e.id !== id) return e;
-        updated = { ...e, ...patch };
-        return updated;
-      }));
-      if (updated) tables.entries.put(updated).catch(logWriteErr);
+      // Compute synchronously before setState (React 18 safe).
+      const existing = entries.find((e) => e.id === id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch };
+      setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+      tables.entries.put(updated).catch(logWriteErr);
       return updated;
     },
     /**
@@ -761,20 +760,32 @@ function useRepository() {
       return created;
     },
     updateToday: (patch) => {
-      let updated = null;
+      // Compute update synchronously from current `entries` closure.
+      // Previous version assigned `updated` inside the setState updater
+      // callback, which in React 18's batched/concurrent mode may be
+      // deferred — leaving `updated` as null when `tables.entries.put`
+      // was about to run, silently skipping IndexedDB persistence.
+      if (!entries.length) return null;
+      let idx = 0;
+      let maxDate = entries[0].date || "";
+      for (let i = 1; i < entries.length; i++) {
+        if ((entries[i].date || "") > maxDate) { maxDate = entries[i].date || ""; idx = i; }
+      }
+      const updated = { ...entries[idx], ...patch };
       setEntries((prev) => {
+        // Re-locate idx inside the updater to stay safe against any
+        // in-flight append (e.g. ensureToday racing with updateToday).
         if (!prev.length) return prev;
-        let idx = 0;
-        let maxDate = prev[0].date || "";
+        let i2 = 0;
+        let m2 = prev[0].date || "";
         for (let i = 1; i < prev.length; i++) {
-          if ((prev[i].date || "") > maxDate) { maxDate = prev[i].date || ""; idx = i; }
+          if ((prev[i].date || "") > m2) { m2 = prev[i].date || ""; i2 = i; }
         }
         const copy = [...prev];
-        updated = { ...copy[idx], ...patch };
-        copy[idx] = updated;
+        copy[i2] = { ...copy[i2], ...patch };
         return copy;
       });
-      if (updated) tables.entries.put(updated).catch(logWriteErr);
+      tables.entries.put(updated).catch(logWriteErr);
       return updated;
     },
     remove: (id) => {
@@ -806,13 +817,11 @@ function useRepository() {
       return iv;
     },
     update: (id, patch) => {
-      let updated = null;
-      setInterventions((prev) => prev.map((iv) => {
-        if (iv.id !== id) return iv;
-        updated = { ...iv, ...patch };
-        return updated;
-      }));
-      if (updated) tables.interventions.put(updated).catch(logWriteErr);
+      const existing = interventions.find((iv) => iv.id === id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch };
+      setInterventions((prev) => prev.map((iv) => (iv.id === id ? { ...iv, ...patch } : iv)));
+      tables.interventions.put(updated).catch(logWriteErr);
       return updated;
     },
     remove: (id) => {
@@ -843,13 +852,11 @@ function useRepository() {
       return snap;
     },
     update: (id, patch) => {
-      let updated = null;
-      setLabs((prev) => prev.map((l) => {
-        if (l.id !== id) return l;
-        updated = { ...l, ...patch };
-        return updated;
-      }));
-      if (updated) tables.labs.put(updated).catch(logWriteErr);
+      const existing = labs.find((l) => l.id === id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch };
+      setLabs((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+      tables.labs.put(updated).catch(logWriteErr);
       return updated;
     },
     remove: (id) => {
@@ -880,13 +887,11 @@ function useRepository() {
       return snap;
     },
     update: (id, patch) => {
-      let updated = null;
-      setBodyComp((prev) => prev.map((b) => {
-        if (b.id !== id) return b;
-        updated = { ...b, ...patch };
-        return updated;
-      }));
-      if (updated) tables.bodyComp.put(updated).catch(logWriteErr);
+      const existing = bodyComp.find((b) => b.id === id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch };
+      setBodyComp((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+      tables.bodyComp.put(updated).catch(logWriteErr);
       return updated;
     },
     remove: (id) => {
@@ -916,13 +921,11 @@ function useRepository() {
       return supp;
     },
     update: (id, patch) => {
-      let updated = null;
-      setSupplements((prev) => prev.map((s) => {
-        if (s.id !== id) return s;
-        updated = { ...s, ...patch };
-        return updated;
-      }));
-      if (updated) tables.supplements.put(updated).catch(logWriteErr);
+      const existing = supplements.find((s) => s.id === id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch };
+      setSupplements((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      tables.supplements.put(updated).catch(logWriteErr);
       return updated;
     },
     discontinue: (id, untilDate = brToday()) => {
