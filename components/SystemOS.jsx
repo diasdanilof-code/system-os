@@ -270,6 +270,10 @@ const makeDailyEntry = (date, dayNum, overrides = {}) => ({
   fiber: false, brazilNuts: false, alcohol: false,
   finalEnergy: null, recovery: null, diet: null,
   nightLogged: false, notes: "", closed: false,
+  // Per-day snapshot of the checklist (morning/work/night maps of id→bool).
+  // Filled live while the user interacts with the Checklist screen for
+  // "today" and frozen the moment a new day begins (via ensureToday).
+  checklistSnapshot: { morning: {}, work: {}, night: {} },
   ...overrides,
 });
 
@@ -736,28 +740,50 @@ function useRepository() {
      */
     ensureToday: () => {
       const today = brToday();
-      let created = false;
-      let newEntry = null;
+      // Compute target synchronously (React 18 safe pattern).
+      if (!entries.length) return false;
+      let idx = 0;
+      let maxDate = entries[0].date || "";
+      for (let i = 1; i < entries.length; i++) {
+        if ((entries[i].date || "") > maxDate) { maxDate = entries[i].date || ""; idx = i; }
+      }
+      const latest = entries[idx];
+      if ((latest.date || "") >= today) return false; // already have today
+
+      // --- DAY ROLLOVER ---
+      // 1) Snapshot the current live checklistState into the PREVIOUS
+      //    day's entry (so history is preserved per day).
+      // 2) Create a new empty DailyEntry for today.
+      // 3) Reset the live checklistSingleton (UI starts fresh).
+      const nextDay = (latest.day || 0) + 1;
+      const latestSnapshot = {
+        ...latest,
+        checklistSnapshot: {
+          morning: { ...(checklistState.morning || {}) },
+          work: { ...(checklistState.work || {}) },
+          night: { ...(checklistState.night || {}) },
+        },
+      };
+      const newEntry = makeDailyEntry(today, nextDay);
       setEntries((prev) => {
         if (!prev.length) return prev;
-        // Find the latest entry
-        let idx = 0;
-        let maxDate = prev[0].date || "";
+        let i2 = 0;
+        let m2 = prev[0].date || "";
         for (let i = 1; i < prev.length; i++) {
-          if ((prev[i].date || "") > maxDate) { maxDate = prev[i].date || ""; idx = i; }
+          if ((prev[i].date || "") > m2) { m2 = prev[i].date || ""; i2 = i; }
         }
-        const latest = prev[idx];
-        if ((latest.date || "") >= today) return prev; // already have today (or future)
-        // Append new day
-        const nextDay = (latest.day || 0) + 1;
-        newEntry = makeDailyEntry(today, nextDay);
-        created = true;
-        return [...prev, newEntry];
+        const copy = [...prev];
+        copy[i2] = latestSnapshot;
+        return [...copy, newEntry];
       });
-      if (created && newEntry) {
-        tables.entries.put(newEntry).catch(logWriteErr);
-      }
-      return created;
+      // Write both writes to IDB
+      tables.entries.put(latestSnapshot).catch(logWriteErr);
+      tables.entries.put(newEntry).catch(logWriteErr);
+      // Reset the live checklist singleton
+      const emptyChecklist = { morning: {}, work: {}, night: {} };
+      setChecklistState(emptyChecklist);
+      tables.checklistSingleton.put({ id: CHECKLIST_SINGLETON_ID, data: emptyChecklist }).catch(logWriteErr);
+      return true;
     },
     updateToday: (patch) => {
       // Compute update synchronously from current `entries` closure.
@@ -983,10 +1009,30 @@ function useRepository() {
   };
 
   const writeChecklist = (nextData) => {
+    // 1) Live singleton (fast access for current UI session).
     tables.checklistSingleton.put({
       id: CHECKLIST_SINGLETON_ID,
       data: nextData,
     }).catch(logWriteErr);
+    // 2) Mirror into today's DailyEntry.checklistSnapshot so the
+    //    per-day history is preserved for analytics / Copilot /
+    //    streak + seal logic that already lives on the entry.
+    if (entries.length) {
+      let idx = 0;
+      let maxDate = entries[0].date || "";
+      for (let i = 1; i < entries.length; i++) {
+        if ((entries[i].date || "") > maxDate) { maxDate = entries[i].date || ""; idx = i; }
+      }
+      const latest = entries[idx];
+      const snapshot = {
+        morning: { ...(nextData.morning || {}) },
+        work: { ...(nextData.work || {}) },
+        night: { ...(nextData.night || {}) },
+      };
+      const updated = { ...latest, checklistSnapshot: snapshot };
+      setEntries((prev) => prev.map((e) => (e.id === latest.id ? { ...e, checklistSnapshot: snapshot } : e)));
+      tables.entries.put(updated).catch(logWriteErr);
+    }
   };
 
   const checklistRepo = {
@@ -3264,6 +3310,31 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
             </button>
           )}
         </Card>
+      )}
+
+      {/* CONFIRM DAY — sempre visível no final do Log, fase independente.
+          Permite fechar o dia a qualquer momento (ex: se dormiu cedo). */}
+      {!today.closed && phase !== "night" && (
+        <Card className="bg-gradient-to-br from-indigo-500/5 to-zinc-900/60 border-indigo-500/20">
+          <div className="flex items-center gap-2 mb-2">
+            <Sunset size={14} className="text-indigo-400" />
+            <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Fechar dia agora</span>
+          </div>
+          <p className="text-[12px] text-zinc-400 leading-relaxed mb-3">
+            Confirme quando quiser encerrar o dia. Todos os registros são salvos
+            e o selo é computado com base nos critérios do protocolo.
+          </p>
+          <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
+            className="w-full py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98] flex items-center justify-center gap-2">
+            <Check size={15} strokeWidth={2.5} /> Confirmar dia
+          </button>
+        </Card>
+      )}
+
+      {today.closed && phase !== "night" && (
+        <div className="w-full py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
+          <Check size={15} strokeWidth={3} /> Dia confirmado
+        </div>
       )}
     </div>
   );
