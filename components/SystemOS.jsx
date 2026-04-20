@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { tables, PROTOCOL_SINGLETON_ID, CHECKLIST_SINGLETON_ID } from "@/lib/db";
 import { seedIfEmpty } from "@/lib/seed";
-import { initSync } from "@/lib/sheetsSync";
+import { initSync, syncRow, pullAll, subscribeSync } from "@/lib/sheetsSync";
 import { fetchCopilot } from "@/lib/copilotClient";
 import { phraseForDay } from "@/lib/phrases";
 import {
@@ -632,6 +632,56 @@ const REVIEW_PERIODS = [
  * ============================================================ */
 
 /**
+ * Collapse entries to one row per date.
+ * When there are duplicates for the same date (e.g., IDB was evicted
+ * and new entries got created with new ids, or pull merged cloud rows),
+ * we pick the row with most recent updatedAt as winner and fill its
+ * nulls from older siblings. Returns a fresh array, one entry per date.
+ */
+function dedupeEntriesByDate(entriesArr) {
+  if (!Array.isArray(entriesArr) || entriesArr.length === 0) return entriesArr || [];
+  const byDate = new Map();
+  for (const e of entriesArr) {
+    if (!e || !e.date) continue;
+    const existing = byDate.get(e.date);
+    if (!existing) {
+      byDate.set(e.date, e);
+      continue;
+    }
+    // Decide winner: most recent updatedAt, else most non-null fields
+    const eUpdated = e.updatedAt || "";
+    const xUpdated = existing.updatedAt || "";
+    let winner, loser;
+    if (eUpdated && xUpdated) {
+      if (eUpdated > xUpdated) { winner = e; loser = existing; }
+      else { winner = existing; loser = e; }
+    } else if (eUpdated) {
+      winner = e; loser = existing;
+    } else if (xUpdated) {
+      winner = existing; loser = e;
+    } else {
+      const eFilled = Object.values(e).filter(v => v !== null && v !== "").length;
+      const xFilled = Object.values(existing).filter(v => v !== null && v !== "").length;
+      winner = eFilled >= xFilled ? e : existing;
+      loser = winner === e ? existing : e;
+    }
+    // Merge: fill winner's nulls from loser
+    const merged = { ...winner };
+    for (const k of Object.keys(loser)) {
+      if (merged[k] === null || merged[k] === undefined || merged[k] === "") {
+        if (loser[k] !== null && loser[k] !== undefined && loser[k] !== "") {
+          merged[k] = loser[k];
+        }
+      }
+    }
+    byDate.set(e.date, merged);
+  }
+  return Array.from(byDate.values()).sort((a, b) =>
+    (a.date || "").localeCompare(b.date || "")
+  );
+}
+
+/**
  * useRepository — Dexie-backed persistence with local-state mirror.
  *
  * Strategy: React useState is the source of truth for the UI
@@ -678,36 +728,104 @@ function useRepository() {
           tables.supplements.toArray(),
           tables.weeklySummaries.orderBy("weekStart").toArray(),
         ]);
-        if (protocolRow) {
+        // --------------------------------------------------------
+        // CLOUD PULL — restores state lost to Safari iOS IDB eviction.
+        // We try to pull from Sheets BEFORE rendering. If online and
+        // pull succeeds, we merge cloud rows into local arrays and
+        // write them back to IDB. Entries get deduped by date so we
+        // never end up with 2 rows for the same day.
+        // --------------------------------------------------------
+        let mergedEntries = entriesArr;
+        let mergedInterventions = interventionsArr;
+        let mergedLabs = labsArr;
+        let mergedBodyComp = bodyCompArr;
+        let mergedSupplements = supplementsArr;
+        let mergedWeekly = weeklyArr;
+        let resolvedProtocolRow = protocolRow;
+
+        if (typeof navigator !== "undefined" && navigator.onLine !== false) {
+          try {
+            const pull = await pullAll({ timeoutMs: 15000 });
+            if (pull.ok && pull.data) {
+              const d = pull.data;
+              const mergeById = (localArr, remoteArr) => {
+                const byId = new Map();
+                [...localArr, ...(remoteArr || [])].forEach((r) => {
+                  if (!r || !r.id) return;
+                  const existing = byId.get(r.id);
+                  if (!existing) { byId.set(r.id, r); return; }
+                  // Prefer newer updatedAt
+                  if ((r.updatedAt || "") > (existing.updatedAt || "")) {
+                    byId.set(r.id, r);
+                  }
+                });
+                return Array.from(byId.values());
+              };
+              mergedEntries = mergeById(entriesArr, d.entries);
+              mergedInterventions = mergeById(interventionsArr, d.interventions);
+              mergedLabs = mergeById(labsArr, d.labs);
+              mergedBodyComp = mergeById(bodyCompArr, d.bodyComp);
+              mergedSupplements = mergeById(supplementsArr, d.supplements);
+              mergedWeekly = mergeById(weeklyArr, d.weeklySummaries);
+              if (!protocolRow && Array.isArray(d.protocol) && d.protocol.length > 0) {
+                resolvedProtocolRow = d.protocol[0];
+              }
+              // Persist any remotely-only rows back to IDB so next load is fast
+              try {
+                const localEntryIds = new Set(entriesArr.map(e => e.id));
+                const newEntries = mergedEntries.filter(e => !localEntryIds.has(e.id));
+                if (newEntries.length) await tables.entries.bulkPut(newEntries);
+              } catch (e) { /* swallow */ }
+            }
+          } catch (pullErr) {
+            // eslint-disable-next-line no-console
+            console.warn("[useRepository] pull failed, using local:", pullErr?.message || pullErr);
+          }
+        }
+
+        // --------------------------------------------------------
+        // DEDUPE entries by date. Collapses any duplicates (local or
+        // remote) into one canonical row per day. Writes the winning
+        // rows back to IDB and deletes losers.
+        // --------------------------------------------------------
+        const beforeCount = mergedEntries.length;
+        mergedEntries = dedupeEntriesByDate(mergedEntries);
+        const afterCount = mergedEntries.length;
+        if (beforeCount !== afterCount) {
+          try {
+            await tables.entries.clear();
+            await tables.entries.bulkPut(mergedEntries);
+          } catch (e) { /* swallow */ }
+        }
+
+        if (resolvedProtocolRow) {
           // eslint-disable-next-line no-unused-vars
-          const { id: _ignoredId, ...cleanProtocol } = protocolRow;
+          const { id: _ignoredId, ...cleanProtocol } = resolvedProtocolRow;
           setProtocol(cleanProtocol);
         }
         if (checklistRow && checklistRow.data) setChecklistState(checklistRow.data);
-        if (entriesArr.length) setEntries(entriesArr);
-        if (interventionsArr.length) setInterventions(interventionsArr);
-        if (labsArr.length) setLabs(labsArr);
+        if (mergedEntries.length) setEntries(mergedEntries);
+        if (mergedInterventions.length) setInterventions(mergedInterventions);
+        if (mergedLabs.length) setLabs(mergedLabs);
         // --------------------------------------------------------
         // One-time migrations (idempotent):
         //  • Ensure real InBody 20/04/2026 exam is present.
         //  • Bump baseline weight to 83.6 if still at 82.
-        // Each checks first, writes only if missing — safe to
-        // re-run on every load.
         // --------------------------------------------------------
         const EXAM_ID_INBODY_20260420 = "body-inbody-20260420";
-        const hasInBody = bodyCompArr.some(b => b.id === EXAM_ID_INBODY_20260420);
-        let effectiveBodyCompArr = bodyCompArr;
+        const hasInBody = mergedBodyComp.some(b => b.id === EXAM_ID_INBODY_20260420);
+        let effectiveBodyCompArr = mergedBodyComp;
         if (!hasInBody) {
           const seed = DEFAULT_BODY_COMP_HISTORY.find(b => b.id === EXAM_ID_INBODY_20260420);
           if (seed) {
             try {
               await tables.bodyComp.put(seed);
-              effectiveBodyCompArr = [...bodyCompArr, seed];
+              effectiveBodyCompArr = [...mergedBodyComp, seed];
             } catch (mErr) { logWriteErr(mErr); }
           }
         }
-        if (protocolRow && protocolRow.baseline && protocolRow.baseline.weight === 82 && protocolRow.baseline.age === 24) {
-          const patched = { ...protocolRow, baseline: { ...protocolRow.baseline, weight: 83.6 }, updatedAt: new Date().toISOString() };
+        if (resolvedProtocolRow && resolvedProtocolRow.baseline && resolvedProtocolRow.baseline.weight === 82 && resolvedProtocolRow.baseline.age === 24) {
+          const patched = { ...resolvedProtocolRow, baseline: { ...resolvedProtocolRow.baseline, weight: 83.6 }, updatedAt: new Date().toISOString() };
           try {
             await tables.protocol.put(patched);
             // eslint-disable-next-line no-unused-vars
@@ -717,8 +835,8 @@ function useRepository() {
         }
 
         if (effectiveBodyCompArr.length) setBodyComp(effectiveBodyCompArr);
-        if (supplementsArr.length) setSupplements(supplementsArr);
-        if (weeklyArr.length) setWeeklySummaries(weeklyArr);
+        if (mergedSupplements.length) setSupplements(mergedSupplements);
+        if (mergedWeekly.length) setWeeklySummaries(mergedWeekly);
         setReady(true);
         initSync(tables);
       } catch (err) {
@@ -785,6 +903,7 @@ function useRepository() {
       const updated = { ...existing, ...patch };
       setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
       tables.entries.put(updated).catch(logWriteErr);
+      try { syncRow("entries", updated); } catch {}
       return updated;
     },
     /**
@@ -795,21 +914,24 @@ function useRepository() {
      */
     ensureToday: () => {
       const today = brToday();
-      // Compute target synchronously (React 18 safe pattern).
       if (!entries.length) return false;
+
+      // GUARD: if ANY entry already exists for today's date, don't
+      // create another. Previous bug: Safari iOS evicted IDB, app
+      // re-created entries with new ids → Sheets accumulated duplicates.
+      const hasTodayEntry = entries.some(e => e && e.date === today);
+      if (hasTodayEntry) return false;
+
+      // Otherwise find latest and rollover.
       let idx = 0;
       let maxDate = entries[0].date || "";
       for (let i = 1; i < entries.length; i++) {
         if ((entries[i].date || "") > maxDate) { maxDate = entries[i].date || ""; idx = i; }
       }
       const latest = entries[idx];
-      if ((latest.date || "") >= today) return false; // already have today
+      if ((latest.date || "") >= today) return false; // already future/today
 
       // --- DAY ROLLOVER ---
-      // 1) Snapshot the current live checklistState into the PREVIOUS
-      //    day's entry (so history is preserved per day).
-      // 2) Create a new empty DailyEntry for today.
-      // 3) Reset the live checklistSingleton (UI starts fresh).
       const nextDay = (latest.day || 0) + 1;
       const latestSnapshot = {
         ...latest,
@@ -822,6 +944,8 @@ function useRepository() {
       const newEntry = makeDailyEntry(today, nextDay);
       setEntries((prev) => {
         if (!prev.length) return prev;
+        // Double-guard inside updater
+        if (prev.some(e => e && e.date === today)) return prev;
         let i2 = 0;
         let m2 = prev[0].date || "";
         for (let i = 1; i < prev.length; i++) {
@@ -831,10 +955,11 @@ function useRepository() {
         copy[i2] = latestSnapshot;
         return [...copy, newEntry];
       });
-      // Write both writes to IDB
       tables.entries.put(latestSnapshot).catch(logWriteErr);
       tables.entries.put(newEntry).catch(logWriteErr);
-      // Reset the live checklist singleton
+      // Push both to cloud explicitly (not just via hooks)
+      try { syncRow("entries", latestSnapshot); } catch {}
+      try { syncRow("entries", newEntry); } catch {}
       const emptyChecklist = { morning: {}, work: {}, night: {} };
       setChecklistState(emptyChecklist);
       tables.checklistSingleton.put({ id: CHECKLIST_SINGLETON_ID, data: emptyChecklist }).catch(logWriteErr);
@@ -872,6 +997,7 @@ function useRepository() {
         return copy;
       });
       tables.entries.put(updated).catch(logWriteErr);
+      try { syncRow("entries", updated); } catch {}
       return updated;
     },
     remove: (id) => {
@@ -1092,6 +1218,7 @@ function useRepository() {
       const updated = { ...latest, checklistSnapshot: snapshot };
       setEntries((prev) => prev.map((e) => (e.id === latest.id ? { ...e, checklistSnapshot: snapshot } : e)));
       tables.entries.put(updated).catch(logWriteErr);
+      try { syncRow("entries", updated); } catch {}
     }
   };
 
@@ -6054,6 +6181,17 @@ export default function SystemOS() {
   const repo = useRepository();
 
   // ------------------------------------------------------------
+  // SYNC STATUS — tiny indicator shown in header so the user can
+  // see that writes are being pushed to Google Sheets (cloud backup).
+  // Three states: synced (green dot), syncing (amber pulse), offline/error.
+  // ------------------------------------------------------------
+  const [syncStatus, setSyncStatus] = useState({ status: "idle", pending: 0 });
+  useEffect(() => {
+    const unsub = subscribeSync(setSyncStatus);
+    return unsub;
+  }, []);
+
+  // ------------------------------------------------------------
   // DATE WATCHER — keeps `today` always equal to Brasília's current
   // calendar day. Triggers:
   //   1. On mount (once repo is ready)
@@ -6217,7 +6355,25 @@ export default function SystemOS() {
         <div className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-zinc-900/80">
           <div className="px-5 py-3.5 flex items-center justify-between">
             <div>
-              <div className="text-[8px] tracking-[0.3em] text-emerald-400/80 uppercase font-bold">System OS · Longevity</div>
+              <div className="text-[8px] tracking-[0.3em] text-emerald-400/80 uppercase font-bold flex items-center gap-1.5">
+                <span>System OS · Longevity</span>
+                <span
+                  title={
+                    syncStatus.status === "syncing" ? `Sincronizando · ${syncStatus.pending} pendente(s)` :
+                    syncStatus.status === "offline" ? "Offline — vai sincronizar quando voltar" :
+                    syncStatus.status === "error" ? "Erro de sync — retentando" :
+                    syncStatus.pending > 0 ? `${syncStatus.pending} pendente(s)` :
+                    "Sincronizado com a nuvem"
+                  }
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${
+                    syncStatus.status === "syncing" ? "bg-amber-400 animate-pulse" :
+                    syncStatus.status === "offline" ? "bg-zinc-500" :
+                    syncStatus.status === "error" ? "bg-rose-500" :
+                    syncStatus.pending > 0 ? "bg-amber-400" :
+                    "bg-emerald-400"
+                  }`}
+                />
+              </div>
               <div className="text-[15px] font-bold tracking-tight leading-tight">DANILO FILHO</div>
             </div>
             <div className="flex items-center gap-2">
