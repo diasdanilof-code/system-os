@@ -643,8 +643,33 @@ const REVIEW_PERIODS = [
  * we pick the row with most recent updatedAt as winner and fill its
  * nulls from older siblings. Returns a fresh array, one entry per date.
  */
+/**
+ * Normalize a date-like value to YYYY-MM-DD string.
+ * Apps Script may return dates as ISO timestamps (2026-04-20T03:00:00.000Z)
+ * because Sheets stores them as Date objects. Collapsing to YYYY-MM-DD
+ * makes sort/lookup/dedupe consistent.
+ */
+function normalizeDate(v) {
+  if (!v) return v;
+  if (typeof v === "string") {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    const m = v.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) return m[1];
+    return v;
+  }
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v);
+}
+
+function normalizeEntry(e) {
+  if (!e) return e;
+  return { ...e, date: normalizeDate(e.date) };
+}
+
 function dedupeEntriesByDate(entriesArr) {
   if (!Array.isArray(entriesArr) || entriesArr.length === 0) return entriesArr || [];
+  // Normalize all dates first, then group.
+  entriesArr = entriesArr.map(normalizeEntry);
   const byDate = new Map();
   for (const e of entriesArr) {
     if (!e || !e.date) continue;
@@ -766,7 +791,11 @@ function useRepository() {
                 });
                 return Array.from(byId.values());
               };
-              mergedEntries = mergeById(entriesArr, d.entries);
+              // Normalize dates on remote entries BEFORE merging, so that
+              // ISO-timestamp variants from Apps Script collapse into
+              // canonical YYYY-MM-DD and don't create duplicate dates.
+              const remoteEntriesNormalized = (d.entries || []).map(normalizeEntry);
+              mergedEntries = mergeById(entriesArr, remoteEntriesNormalized);
               mergedInterventions = mergeById(interventionsArr, d.interventions);
               mergedLabs = mergeById(labsArr, d.labs);
               mergedBodyComp = mergeById(bodyCompArr, d.bodyComp);
@@ -789,10 +818,15 @@ function useRepository() {
         }
 
         // --------------------------------------------------------
-        // DEDUPE entries by date. Collapses any duplicates (local or
-        // remote) into one canonical row per day. Writes the winning
-        // rows back to IDB and deletes losers.
+        // NORMALIZE + DEDUPE entries.
+        //   1) Normalize all `date` fields to YYYY-MM-DD (collapses
+        //      ISO-timestamp variants that came from Apps Script).
+        //   2) Dedupe by date (merges partial writes, keeps newest).
+        //   3) If the set changed, rewrite IDB from scratch to purge
+        //      any stale rows — and push the canonical rows back to
+        //      the cloud so Sheets stops carrying duplicates.
         // --------------------------------------------------------
+        mergedEntries = mergedEntries.map(normalizeEntry);
         const beforeCount = mergedEntries.length;
         mergedEntries = dedupeEntriesByDate(mergedEntries);
         const afterCount = mergedEntries.length;
@@ -801,6 +835,8 @@ function useRepository() {
             await tables.entries.clear();
             await tables.entries.bulkPut(mergedEntries);
           } catch (e) { /* swallow */ }
+          // Re-push canonical rows to cloud to replace the bogus duplicates.
+          mergedEntries.forEach(e => { try { syncRow("entries", e); } catch {} });
         }
 
         if (resolvedProtocolRow) {
