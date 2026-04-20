@@ -1688,11 +1688,17 @@ const Deterministic = {
 function buildRuleContext({ entries, protocol, labs, bodyComp, interventions }) {
   const logged = Deterministic.filterClosed(entries);
   const { recent, prior } = Deterministic.splitWindow(entries, 7);
-  const ready = logged.length >= 3;
+  // v3: Copilot is always `ready`. Historically we required 3 closed days
+  // before surfacing AI output (to avoid noise from too-few points).
+  // Now the Strategist prompt explicitly handles the "cold start" case
+  // via confidence gating, so we unlock UI immediately. `daysLogged`
+  // is still passed downstream so prompts can self-calibrate.
+  const ready = true;
+  const hasEnoughForDeltas = logged.length >= 3;
 
   const dMetric = (key) => Deterministic.windowDelta(recent, prior, key);
 
-  const metrics = ready ? {
+  const metrics = hasEnoughForDeltas ? {
     dSleep: dMetric("sleepH"),
     dEnergy: dMetric("energy"),
     dRecovery: dMetric("recovery"),
@@ -1700,13 +1706,18 @@ function buildRuleContext({ entries, protocol, labs, bodyComp, interventions }) 
     dHunger: dMetric("hunger"),
     dCompliance: Deterministic.avg(recent.map(e => Deterministic.computeCompliance(e, protocol))) -
                  Deterministic.avg(prior.map(e => Deterministic.computeCompliance(e, protocol))),
-  } : null;
+  } : {
+    // Cold-start: zero deltas. Prompts see `days_logged` and
+    // calibrate confidence on their own.
+    dSleep: 0, dEnergy: 0, dRecovery: 0, dFocus: 0, dHunger: 0, dCompliance: 0,
+  };
 
   const hitRate = (key, inv = false) => Deterministic.hitRate(recent, key, inv);
 
   return {
     entries, protocol, labs, bodyComp, interventions,
-    logged, ready, daysNeeded: ready ? 0 : 3 - logged.length,
+    logged, ready, daysNeeded: 0, daysLogged: logged.length,
+    hasEnoughForDeltas,
     recent, prior, hitRate, metrics,
   };
 }
