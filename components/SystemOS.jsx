@@ -175,12 +175,60 @@ function currentPhase() {
 
 const SCHEMA_VERSIONS = {
   protocol: 1,
-  dailyEntry: 1,
+  // v2 (2026-04-20): fiber/brazilNuts dropped as protocol pillars.
+  //   Timestamps added: morningLoggedAt, nightLoggedAt, closedAt, updatedAt.
+  //   Seal/compliance version-gated: legacy v1 entries keep old predicate.
+  dailyEntry: 2,
   intervention: 1,
   labSnapshot: 1,
   bodyCompSnapshot: 1,
   weeklySummary: 1,
   supplementStackEntry: 1,
+};
+
+// ============================================================
+// [0.2] SYSTEM INTEGRITY REGISTRY — app self-improvement layer
+// ------------------------------------------------------------
+// Tracks: what changed, what to watch, what's next.
+// NOT shown to end user. Used by developer notes + future
+// App-Improvement-Agent logic to iterate this OS intelligently.
+// Each entry is dated so we can detect drift.
+// ============================================================
+const SYSTEM_INTEGRITY = {
+  buildDate: "2026-04-20",
+  schemaVersion: 2,
+  // Pillars currently tracked + their expected daily hit-rate floor.
+  pillars: [
+    { id: "training", label: "Treino matinal", floor: 0.85, tag: "LDL" },
+    { id: "sleep",    label: "Sono ≥ alvo",    floor: 0.85, tag: "TSH" },
+    { id: "sauna",    label: "Sauna",          floor: 0.70, tag: "RECOVERY" },
+    { id: "hbot",     label: "HBOT",           floor: 0.70, tag: "RECOVERY" },
+    { id: "redLight", label: "Luz vermelha",   floor: 0.60, tag: "RECOVERY" },
+    { id: "noAlcohol", label: "Zero álcool",   floor: 0.95, tag: "FÍGADO" },
+    { id: "recovery", label: "Recovery ≥7",    floor: 0.70, tag: "TSH" },
+    { id: "diet",     label: "Dieta ≥7",       floor: 0.70, tag: "FOME" },
+  ],
+  // Legacy fields kept on DailyEntry for back-compat but no longer
+  // driving scoring. If an audit job ever shows hit-rate > 0 on these,
+  // it means the user is still logging — worth a reconsideration.
+  deprecatedFields: ["fiber", "brazilNuts", "finalEnergy"],
+  // Fields not yet captured that a Blueprint-style protocol would
+  // typically track. Candidates for future Log expansion.
+  futureCandidates: [
+    "hrv", "restingHR", "trainingZone", "cardioMinutes",
+    "saunaMinutes", "hbotMinutes", "redLightMinutes",
+    "hydrationL", "proteinG", "steps", "meditationMin",
+    "sunlightMin", "coldExposureMin",
+  ],
+  // Checks that should pass on every build. Non-enforced in runtime;
+  // used as a manual TODO guide by the dev agent.
+  invariants: [
+    "every DailyEntry field has a UI setter",
+    "every lifecycle flag (morningLogged/nightLogged/closed) is user-writable",
+    "every IDB write is paired with a React state update",
+    "seal predicate is version-gated so legacy entries stay comparable",
+    "Copilot prompts never reference deprecated pillars",
+  ],
 };
 
 // Helper: stable unique ID with entity prefix
@@ -216,8 +264,8 @@ const makeProtocol = (overrides = {}) => ({
   baseline: { weight: 83.6, age: 24, height: 1.83 },
   biomarkers: {
     elevated: [
-      { name: "LDL", priority: "alta", levers: ["ômega 3", "fibra solúvel", "cardio Z2", "azeite"] },
-      { name: "TSH", priority: "alta", levers: ["sono ≥7,5h", "castanha do Pará", "reduzir estresse"] },
+      { name: "LDL", priority: "alta", levers: ["ômega 3", "cardio Z2", "azeite", "zero álcool"] },
+      { name: "TSH", priority: "alta", levers: ["sono ≥7,5h", "reduzir estresse", "recovery ≥7"] },
       { name: "Fígado (ALT/GGT)", priority: "média", levers: ["zero álcool", "sem processados", "crucíferos"] },
     ],
     good: [
@@ -259,17 +307,24 @@ const makeDailyEntry = (date, dayNum, overrides = {}) => ({
   id: newId("day"),
   version: SCHEMA_VERSIONS.dailyEntry,
   createdAt: new Date().toISOString(),
+  updatedAt: null,          // set by updateToday on every write
   source: "manual",
   day: dayNum,
   date,
   dateLabel: formatDateBR(date),
-  weight: null, sleepH: null, sleepQ: null, morningLogged: false,
+  weight: null, sleepH: null, sleepQ: null,
+  morningLogged: false, morningLoggedAt: null,
   energy: null, focus: null, mood: null, stress: null,
   hunger: null, cravings: null,
   training: false, sauna: false, hbot: false, redLight: false,
-  fiber: false, brazilNuts: false, alcohol: false,
+  // Legacy fields (v1). Kept for back-compat with old persisted rows.
+  // Removed from UI + scoring in schema v2 — do NOT consume in new logic.
+  fiber: false, brazilNuts: false,
+  alcohol: false,
   finalEnergy: null, recovery: null, diet: null,
-  nightLogged: false, notes: "", closed: false,
+  nightLogged: false, nightLoggedAt: null,
+  notes: "",
+  closed: false, closedAt: null,
   // Per-day snapshot of the checklist (morning/work/night maps of id→bool).
   // Filled live while the user interacts with the Checklist screen for
   // "today" and frozen the moment a new day begins (via ensureToday).
@@ -341,7 +396,7 @@ const DEFAULT_INTERVENTIONS = [
     action: "start",
     category: "protocol",
     title: "Início do protocolo de 90 dias",
-    body: "Stack de base: treino manhã, sauna, HBOT, luz vermelha, dieta alta em proteína + fibra, zero álcool.",
+    body: "Stack de base: treino manhã, sauna, HBOT, luz vermelha, dieta alta em proteína, zero álcool.",
     tags: ["baseline", "protocol"],
   }),
 ];
@@ -787,20 +842,25 @@ function useRepository() {
     },
     updateToday: (patch) => {
       // Compute update synchronously from current `entries` closure.
-      // Previous version assigned `updated` inside the setState updater
-      // callback, which in React 18's batched/concurrent mode may be
-      // deferred — leaving `updated` as null when `tables.entries.put`
-      // was about to run, silently skipping IndexedDB persistence.
+      // (React 18 batched mode makes updater-internal assignment unsafe
+      // for side effects like IDB writes — see previous fix commit.)
       if (!entries.length) return null;
       let idx = 0;
       let maxDate = entries[0].date || "";
       for (let i = 1; i < entries.length; i++) {
         if ((entries[i].date || "") > maxDate) { maxDate = entries[i].date || ""; idx = i; }
       }
-      const updated = { ...entries[idx], ...patch };
+      const latest = entries[idx];
+      const now = new Date().toISOString();
+      // Derive timestamp fields: if a lifecycle flag is flipping to true
+      // in this patch, stamp its *At timestamp automatically.
+      const lifecycleStamps = {};
+      if (patch.morningLogged === true && !latest.morningLoggedAt) lifecycleStamps.morningLoggedAt = now;
+      if (patch.nightLogged === true && !latest.nightLoggedAt) lifecycleStamps.nightLoggedAt = now;
+      if (patch.closed === true && !latest.closedAt) lifecycleStamps.closedAt = now;
+      const fullPatch = { ...patch, ...lifecycleStamps, updatedAt: now };
+      const updated = { ...latest, ...fullPatch };
       setEntries((prev) => {
-        // Re-locate idx inside the updater to stay safe against any
-        // in-flight append (e.g. ensureToday racing with updateToday).
         if (!prev.length) return prev;
         let i2 = 0;
         let m2 = prev[0].date || "";
@@ -808,7 +868,7 @@ function useRepository() {
           if ((prev[i].date || "") > m2) { m2 = prev[i].date || ""; i2 = i; }
         }
         const copy = [...prev];
-        copy[i2] = { ...copy[i2], ...patch };
+        copy[i2] = { ...copy[i2], ...fullPatch };
         return copy;
       });
       tables.entries.put(updated).catch(logWriteErr);
@@ -1118,7 +1178,7 @@ function buildChecklist(protocol) {
         { id: "m4", label: "Sauna 15–20 min", time: protocol.saunaTime },
         { id: "m5", label: "HBOT 60 min", time: protocol.hbotTime },
         { id: "m6", label: "Creatina + CoQ10 + Ômega 3", time: protocol.hbotTime },
-        { id: "m7", label: "Café com 40g proteína + fibra", time: "pós-HBOT" },
+        { id: "m7", label: "Café com 40g proteína", time: "pós-HBOT" },
       ],
     },
     work: {
@@ -1127,10 +1187,8 @@ function buildChecklist(protocol) {
       items: [
         { id: "w1", label: "Hidratação 3,5L", time: "o dia todo" },
         { id: "w2", label: "Almoço — proteína + crucífero", time: "12:30" },
-        { id: "w3", label: "2 castanhas do Pará", time: "almoço" },
         { id: "w4", label: "Luz vermelha 10–15 min", time: protocol.redLightTime },
         { id: "w5", label: "Corte de cafeína", time: "14:00" },
-        { id: "w6", label: "Fibra solúvel (aveia/chia/feijão)", time: "refeições" },
         { id: "w7", label: "Fechar trabalho", time: protocol.workEnd },
       ],
     },
@@ -1267,11 +1325,25 @@ const d_hitRate = (entries, key, inverted = false) => {
  */
 const d_computeCompliance = (entry, protocol) => {
   if (!entry || !entry.morningLogged) return 0;
-  const weights = {
-    training: 10, sauna: 6, hbot: 8, redLight: 4,
-    sleepHit: 15, sleepQualHit: 8, dietHit: 10, recoveryHit: 6,
-    fiber: 8, brazilNuts: 4, noAlcohol: 9,
-  };
+  // Version-gated: v1 entries keep legacy predicate (fiber + brazilNuts
+  // included) so historical compliance numbers stay comparable.
+  // v2+ entries drop those two — they are no longer protocol pillars.
+  const isLegacy = (entry.version || 1) < 2;
+  const weights = isLegacy
+    ? {
+        training: 10, sauna: 6, hbot: 8, redLight: 4,
+        sleepHit: 15, sleepQualHit: 8, dietHit: 10, recoveryHit: 6,
+        fiber: 8, brazilNuts: 4, noAlcohol: 9,
+      }
+    : {
+        // v2 — rebalanced toward Blueprint-style pillars.
+        // Training + sleep + recovery carry the most weight; red-light +
+        // HBOT + sauna are supporting longevity interventions; alcohol is
+        // a negative-lever.
+        training: 12, sauna: 7, hbot: 10, redLight: 6,
+        sleepHit: 18, sleepQualHit: 10, dietHit: 12, recoveryHit: 8,
+        noAlcohol: 10,
+      };
   const hits = {
     training: entry.training, sauna: entry.sauna,
     hbot: entry.hbot, redLight: entry.redLight,
@@ -1279,7 +1351,8 @@ const d_computeCompliance = (entry, protocol) => {
     sleepQualHit: entry.sleepQ != null && entry.sleepQ >= 7,
     dietHit: entry.diet != null && entry.diet >= 7,
     recoveryHit: entry.recovery != null && entry.recovery >= 7,
-    fiber: entry.fiber, brazilNuts: entry.brazilNuts, noAlcohol: !entry.alcohol,
+    noAlcohol: !entry.alcohol,
+    ...(isLegacy ? { fiber: entry.fiber, brazilNuts: entry.brazilNuts } : {}),
   };
   const total = Object.values(weights).reduce((a, b) => a + b, 0);
   const earned = Object.keys(weights).reduce((sum, k) => sum + (hits[k] ? weights[k] : 0), 0);
@@ -1319,14 +1392,19 @@ const d_computeRecoveryScore = (entry, protocol) => {
 
 const d_computeMetabolicScore = (entry, protocol) => {
   if (!entry) return null;
+  const isLegacy = (entry.version || 1) < 2;
   const parts = [];
-  if (entry.diet != null) parts.push({ v: entry.diet * 10, w: 0.25 });
-  parts.push({ v: entry.fiber ? 100 : 0, w: 0.20 });
-  parts.push({ v: entry.brazilNuts ? 100 : 0, w: 0.08 });
-  parts.push({ v: entry.alcohol ? 0 : 100, w: 0.17 });
-  parts.push({ v: entry.training ? 100 : 0, w: 0.15 });
-  if (entry.hunger != null) parts.push({ v: (10 - entry.hunger) * 10, w: 0.08 });
-  if (entry.cravings != null) parts.push({ v: (10 - entry.cravings) * 10, w: 0.07 });
+  // v2 rebalance: diet + alcohol-free + training-done carry the weight.
+  // Hunger + cravings sub-scores kept as satiety signals.
+  if (entry.diet != null) parts.push({ v: entry.diet * 10, w: isLegacy ? 0.25 : 0.38 });
+  if (isLegacy) {
+    parts.push({ v: entry.fiber ? 100 : 0, w: 0.20 });
+    parts.push({ v: entry.brazilNuts ? 100 : 0, w: 0.08 });
+  }
+  parts.push({ v: entry.alcohol ? 0 : 100, w: isLegacy ? 0.17 : 0.25 });
+  parts.push({ v: entry.training ? 100 : 0, w: isLegacy ? 0.15 : 0.22 });
+  if (entry.hunger != null) parts.push({ v: (10 - entry.hunger) * 10, w: isLegacy ? 0.08 : 0.08 });
+  if (entry.cravings != null) parts.push({ v: (10 - entry.cravings) * 10, w: isLegacy ? 0.07 : 0.07 });
   const totalW = parts.reduce((a, b) => a + b.w, 0);
   return Math.round(parts.reduce((a, b) => a + b.v * b.w, 0) / totalW);
 };
@@ -1469,16 +1547,22 @@ const d_streak = (entries, predicate) => {
 const d_isSealedDay = (e) => {
   if (!e || e.day === 0) return false;
   if (!e.closed) return false;
+  // v1 (legacy) entries required fiber + brazilNuts.
+  // v2+ drops them — they are no longer protocol pillars.
+  const isLegacy = (e.version || 1) < 2;
+  if (isLegacy && !e.fiber) return false;
+  if (isLegacy && !e.brazilNuts) return false;
+  // Core protocol pillars — required for all versions:
   if (!e.training) return false;
   if (!e.sauna) return false;
   if (!e.hbot) return false;
   if (!e.redLight) return false;
-  if (!e.fiber) return false;
-  if (!e.brazilNuts) return false;
+  // Core data points — required:
   if (e.weight == null) return false;
   if (e.sleepH == null) return false;
   if (e.recovery == null) return false;
   if (e.diet == null) return false;
+  // Negative lever — zero alcohol is a seal requirement:
   if (e.alcohol !== false) return false;
   return true;
 };
@@ -1675,14 +1759,6 @@ function detectPatterns(ctx) {
     tag: "RECOVERY", icon: Droplet,
   });
 
-  const fiberRate = hitRate("fiber");
-  const highHungerDays = recent.filter(e => e.hunger >= 7);
-  if (fiberRate > 0.7 && highHungerDays.length <= 2) out.push({
-    title: "Fibra diária → Fome controlada",
-    body: `Fibra solúvel em ${Math.round(fiberRate * 100)}% dos dias parece estar suavizando picos de fome.`,
-    tag: "FOME", icon: Leaf,
-  });
-
   const alcoholFreeRate = hitRate("alcohol", true);
   if (alcoholFreeRate === 1) out.push({
     title: "Zero álcool mantido",
@@ -1706,12 +1782,12 @@ function rankDrivers(ctx) {
       body: "Cardio + força diário. Base do experimento e alavanca primária de LDL." },
     { title: "Zero álcool", impact: 5, tag: "FÍGADO",
       body: "Inegociável para ALT/GGT. Manter o streak vale mais que qualquer suplemento." },
-    { title: "Fibra solúvel diária", impact: 4, tag: "LDL",
-      body: "Aveia, chia, feijão, psyllium. Liga bile acids → fígado puxa LDL do sangue." },
     { title: "HBOT pós-treino", impact: 4, tag: "RECOVERY",
       body: "Logo depois da sauna. Janela pós-treino maximiza benefício sistêmico." },
     { title: "Proteína 40g+ no café", impact: 4, tag: "FOME",
       body: "Neutraliza perfil de fome alta pelo resto do dia de trabalho." },
+    { title: "Cardio Z2 consistente", impact: 4, tag: "LDL",
+      body: "Blocos Z2 semanais movem LDL no longo prazo sem sacrificar recovery." },
   ];
 }
 
@@ -1724,9 +1800,9 @@ function buildImproveShortList(ctx) {
   if (ready) {
     if (metrics.dSleep < -0.2) improveNow.push({ text: `Antecipar sono em 30 min — meta ${protocol.sleepTarget}h`, tag: "TSH", window: "amanhã" });
     if (hitRate("training") < 0.6) improveNow.push({ text: "Treino manhã mesmo cansado — âncora do dia", tag: "LDL", window: "amanhã" });
-    if (hitRate("fiber") < 0.6) improveNow.push({ text: "Deixar aveia + chia prontos na noite anterior", tag: "LDL", window: "amanhã" });
-    if (hitRate("brazilNuts") < 0.6) improveNow.push({ text: "Deixar 2 castanhas na mesa do trabalho", tag: "TSH", window: "amanhã" });
     if (hitRate("hbot") < 0.7) improveNow.push({ text: "HBOT imediatamente após sauna", tag: "RECOVERY", window: "amanhã" });
+    if (hitRate("sauna") < 0.7) improveNow.push({ text: "Sauna 15–20 min pós-treino — bloco fixo", tag: "RECOVERY", window: "amanhã" });
+    if (hitRate("redLight") < 0.6) improveNow.push({ text: "Luz vermelha 10 min pós-almoço, no trabalho", tag: "RECOVERY", window: "amanhã" });
   }
   while (improveNow.length < 3) improveNow.push({ text: "Manter o ritmo — sistema rodando", tag: "BASE", window: "amanhã" });
 
@@ -1745,7 +1821,6 @@ function buildImproveShortList(ctx) {
 function buildExperimentLists(_ctx) {
   const testsNext = [
     { title: "Magnésio glicinato extra à noite", why: "Se sono continuar abaixo da meta, testar dose extra no TSH.", tag: "TSH" },
-    { title: "Psyllium husk 5–10g antes do almoço", why: "Potencial boost de fibra solúvel para LDL.", tag: "LDL" },
     { title: "Alongar janela Z2 para 40 min", why: "Mais tempo em Z2 tende a reduzir LDL progressivamente.", tag: "LDL" },
     { title: "Cold exposure pós-HBOT", why: "Pode intensificar recovery se já estiver estável.", tag: "RECOVERY" },
   ];
@@ -1763,16 +1838,16 @@ function buildExperimentLists(_ctx) {
 function buildRiskWatch(_ctx) {
   return [
     { title: "LDL", tag: "LDL", level: "alta",
-      body: "Alvo: cardio 3x/sem + fibra 7/7 + zero álcool + ômega 3 diário. Retestar em 45d.",
+      body: "Alvo: cardio Z2 3x/sem + zero álcool + ômega 3 diário. Retestar em 45d.",
       icon: Activity },
     { title: "TSH", tag: "TSH", level: "alta",
-      body: "Alvo: sono 7,5h 7/7 + castanha Pará diária + reduzir estresse. Monitorar T3/T4 junto.",
+      body: "Alvo: sono 7,5h 7/7 + reduzir estresse + recovery ≥7. Monitorar T3/T4 junto.",
       icon: Brain },
     { title: "Fígado (ALT/GGT)", tag: "FÍGADO", level: "média",
       body: "Alvo: zero álcool + sem ultraprocessados + crucíferos diários. Retestar em 60d.",
       icon: Shield },
     { title: "Fome / saciedade", tag: "FOME", level: "baixa",
-      body: "Alvo: 40g proteína manhã + fibra + hidratação. Evitar picos calóricos à noite.",
+      body: "Alvo: 40g proteína no café + hidratação + evitar picos calóricos à noite.",
       icon: Utensils },
     { title: "Composição corporal", tag: "BASE", level: "observar",
       body: "Alvo: manter massa magra durante o processo. Rebioimpedância em 45d.",
@@ -1786,25 +1861,31 @@ function buildRiskWatch(_ctx) {
 // --------------------------------------------------------------
 function assessLongevityAlignment(ctx) {
   const { hitRate, recent, protocol } = ctx;
-  const ldlAligned = hitRate("training") >= 0.6 && hitRate("fiber") >= 0.6;
-  const tshAligned = hitRate("brazilNuts") >= 0.5 && Deterministic.avg(recent.map(e => e.sleepH)) >= protocol.sleepTarget;
+  const avgSleep = Deterministic.avg(recent.map(e => e.sleepH));
+  const avgRecovery = Deterministic.avg(recent.map(e => e.recovery));
+  const avgDiet = Deterministic.avg(recent.map(e => e.diet));
+  const avgHunger = Deterministic.avg(recent.map(e => e.hunger));
+
+  // v2 alignment predicates — no dependence on fiber/brazilNuts.
+  const ldlAligned = hitRate("training") >= 0.6 && hitRate("alcohol", true) >= 0.85;
+  const tshAligned = avgSleep >= protocol.sleepTarget && avgRecovery >= 7;
   const liverAligned = hitRate("alcohol", true) === 1;
-  const satietyAligned = hitRate("fiber") >= 0.6;
+  const satietyAligned = avgHunger != null && avgHunger <= 6 && avgDiet >= 7;
   const recoveryAligned = hitRate("hbot") >= 0.6 && hitRate("sauna") >= 0.6;
 
   return [
     { strategy: "LDL-friendly", icon: Activity, tag: "LDL",
       aligned: ldlAligned,
-      note: ldlAligned ? "Cardio + fibra sustentando o alvo" : "Reforçar cardio e fibra diariamente" },
+      note: ldlAligned ? "Cardio consistente + zero álcool sustentando o alvo" : "Reforçar cardio diário + zero álcool" },
     { strategy: "Thyroid-aware", icon: Brain, tag: "TSH",
       aligned: tshAligned,
-      note: tshAligned ? "Sono e selênio sustentando o alvo" : "Priorizar sono consistente e selênio" },
+      note: tshAligned ? "Sono e recovery sustentando o alvo" : "Priorizar sono ≥7,5h + recovery ≥7" },
     { strategy: "Liver-friendly", icon: Shield, tag: "FÍGADO",
       aligned: liverAligned,
       note: liverAligned ? "Zero álcool mantido" : "Qualquer álcool quebra a estratégia" },
     { strategy: "Satiety control", icon: Utensils, tag: "FOME",
       aligned: satietyAligned,
-      note: satietyAligned ? "Fibra dominando a curva de fome" : "Aumentar consistência de fibra" },
+      note: satietyAligned ? "Fome e dieta controladas" : "40g proteína no café + reduzir picos noturnos" },
     { strategy: "Recovery compounding", icon: Heart, tag: "RECOVERY",
       aligned: recoveryAligned,
       note: recoveryAligned ? "Stack HBOT + sauna consistente" : "Estabilizar janela de recovery pós-treino" },
@@ -1932,14 +2013,6 @@ function generateTomorrowPlan(ctx, recentIntervention) {
       tag: "LDL", icon: Dumbbell,
     });
 
-    if (hitRate("fiber") < 0.6) candidates.push({
-      priority: 80 + (0.6 - hitRate("fiber")) * 50,
-      action: "30g de fibra solúvel amanhã",
-      why: `Fibra em ${Math.round(hitRate("fiber") * 100)}% dos dias. Liga bile acids → LDL desce.`,
-      how: "Aveia 50g café + chia 2 col almoço + feijão jantar. Deixar pronto hoje.",
-      tag: "LDL", icon: Leaf,
-    });
-
     if (hitRate("hbot") < 0.7) candidates.push({
       priority: 75 + (metrics.dRecovery < 0 ? 15 : 0),
       action: "HBOT 60 min logo após sauna",
@@ -1948,12 +2021,12 @@ function generateTomorrowPlan(ctx, recentIntervention) {
       tag: "RECOVERY", icon: Droplet,
     });
 
-    if (hitRate("brazilNuts") < 0.6) candidates.push({
+    if (hitRate("redLight") < 0.6) candidates.push({
       priority: 70,
-      action: "2 castanhas do Pará no almoço",
-      why: `Selênio em apenas ${Math.round(hitRate("brazilNuts") * 100)}% dos dias. Apoia conversão T4→T3.`,
-      how: "Deixar pote na mesa de trabalho. Comer junto com o almoço.",
-      tag: "TSH", icon: Sparkles,
+      action: "Luz vermelha 10 min pós-almoço",
+      why: `Red light em apenas ${Math.round(hitRate("redLight") * 100)}% dos dias. Recuperação mitocondrial subutilizada.`,
+      how: "Bloco fixo 13:00 no trabalho. 10–15 min na rotina.",
+      tag: "RECOVERY", icon: Sun,
     });
 
     if (hitRate("alcohol") > 0) candidates.push({
@@ -1993,9 +2066,9 @@ function generateTomorrowPlan(ctx, recentIntervention) {
   const todayEntry = entries[entries.length - 1];
   if (!ready && todayEntry) {
     if (!todayEntry.training) candidates.push({ priority: 90, action: "Treino manhã 07:00", why: "Base do protocolo.", how: "Mochila pronta na noite anterior.", tag: "LDL", icon: Dumbbell });
-    if (!todayEntry.fiber) candidates.push({ priority: 80, action: "30g de fibra solúvel", why: "Alavanca LDL.", how: "Aveia + chia.", tag: "LDL", icon: Leaf });
-    if (!todayEntry.brazilNuts) candidates.push({ priority: 70, action: "2 castanhas do Pará", why: "Selênio para TSH.", how: "Junto com o almoço.", tag: "TSH", icon: Sparkles });
     if (!todayEntry.hbot) candidates.push({ priority: 75, action: "HBOT 60 min", why: "Recovery compounding.", how: "Após sauna.", tag: "RECOVERY", icon: Droplet });
+    if (!todayEntry.sauna) candidates.push({ priority: 72, action: "Sauna 15–20 min", why: "Heat shock + HSP.", how: "Pós-treino, janela fixa.", tag: "RECOVERY", icon: Flame });
+    if (!todayEntry.redLight) candidates.push({ priority: 60, action: "Luz vermelha 10 min", why: "Recuperação mitocondrial.", how: "Pós-almoço, no trabalho.", tag: "RECOVERY", icon: Sun });
   }
 
   // Boost priority where a recent intervention is topically linked.
@@ -2746,8 +2819,6 @@ const HomeScreen = ({ entries, today, protocol, ai, setTab, setTodayField, openA
     if (!today.sauna) items.push({ label: "Sauna 15–20 min", time: protocol.saunaTime, tab: "log", phase: "day", urgent: now >= 9 });
     if (!today.hbot) items.push({ label: "HBOT 60 min", time: protocol.hbotTime, tab: "log", phase: "day", urgent: now >= 10 });
     if (!today.redLight) items.push({ label: "Luz vermelha (trabalho)", time: protocol.redLightTime, tab: "log", phase: "day", urgent: now >= 15 });
-    if (!today.fiber) items.push({ label: "Fibra solúvel", time: "refeições", tab: "log", phase: "day" });
-    if (!today.brazilNuts) items.push({ label: "2 castanhas do Pará", time: "almoço", tab: "log", phase: "day" });
     if (phase === "night" && today.recovery == null) items.push({ label: "Registrar recovery", time: "noite", tab: "log", phase: "night", urgent: true });
     if (phase === "night" && today.diet == null) items.push({ label: "Registrar dieta", time: "noite", tab: "log", phase: "night", urgent: true });
     return items;
@@ -2773,15 +2844,16 @@ const HomeScreen = ({ entries, today, protocol, ai, setTab, setTodayField, openA
       action: "Manter o ritmo + adicionar 1 teste novo",
       tag: "BASE", icon: TrendingUp,
     };
-    const weakest = ["fiber", "brazilNuts", "hbot"].find(k => {
+    const weakest = ["hbot", "sauna", "redLight", "training"].find(k => {
       const rate = Deterministic.last(entries.filter(e => e.closed), 7).filter(e => e[k]).length / 7;
       return rate < 0.5;
     });
     if (weakest) {
       const map = {
-        fiber: { title: "Gargalo: fibra", body: "Fibra solúvel abaixo de 50% — alavanca forte de LDL subutilizada.", action: "Deixar aveia pronta amanhã", tag: "LDL", icon: Leaf },
-        brazilNuts: { title: "Gargalo: selênio", body: "Castanha do Pará abaixo de 50% — alavanca de TSH ignorada.", action: "Deixar castanhas na mesa", tag: "TSH", icon: Sparkles },
         hbot: { title: "Gargalo: HBOT", body: "HBOT abaixo de 50% — janela pós-sauna perdida.", action: "Encadear HBOT logo após sauna", tag: "RECOVERY", icon: Droplet },
+        sauna: { title: "Gargalo: sauna", body: "Sauna abaixo de 50% — HSP + heat shock perdidos.", action: "Bloquear 20min pós-treino", tag: "RECOVERY", icon: Flame },
+        redLight: { title: "Gargalo: luz vermelha", body: "Luz vermelha abaixo de 50% — janela de recuperação mitocondrial pulada.", action: "Fixar bloco de 10min pós-almoço", tag: "RECOVERY", icon: Sun },
+        training: { title: "Gargalo: treino", body: "Treino abaixo de 50% — pilar central do protocolo comprometido.", action: "Treino amanhã de manhã, sem exceção", tag: "BASE", icon: Dumbbell },
       };
       return { type: "bottleneck", ...map[weakest] };
     }
@@ -3255,13 +3327,14 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
 
           <Card>
             <div className="flex items-center gap-2 mb-4">
-              <Leaf size={14} className="text-emerald-400" />
-              <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Alavancas</span>
+              <Shield size={14} className="text-rose-400" />
+              <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Levers negativos</span>
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              <QuickAction label="Fibra" value={today.fiber} onChange={(v) => setTodayField("fiber", v)} icon={Leaf} color="emerald" />
-              <QuickAction label="Castanha" value={today.brazilNuts} onChange={(v) => setTodayField("brazilNuts", v)} icon={Sparkles} color="amber" />
-              <QuickAction label="Álcool" value={today.alcohol} onChange={(v) => setTodayField("alcohol", v)} icon={AlertTriangle} color="rose" />
+            <div className="grid grid-cols-1 gap-2">
+              <QuickAction label="Álcool hoje" value={today.alcohol} onChange={(v) => setTodayField("alcohol", v)} icon={AlertTriangle} color="rose" />
+            </div>
+            <div className="text-[10px] text-zinc-500 mt-2 leading-relaxed">
+              Zero álcool é uma das alavancas mais baratas para LDL + fígado + sono.
             </div>
           </Card>
 
@@ -3675,7 +3748,7 @@ const AI = ({ ai, entries, protocol, labs, bodyComp, interventions, initialSecti
                 { key: "recovery", label: "Recovery", color: "#34d399", icon: Heart,
                   sources: "recovery · sono · qualidade · HBOT · sauna · luz" },
                 { key: "metabolic", label: "Metabólico", color: "#a78bfa", icon: FlaskConical,
-                  sources: "dieta · fibra · álcool · treino · fome · desejos" },
+                  sources: "dieta · álcool · treino · fome · desejos" },
               ].map(s => {
                 const sc = ai.scores[s.key];
                 const trendIcon = sc.trend.dir === "up" ? ArrowUp : sc.trend.dir === "down" ? ArrowDown : Minus;
@@ -5331,6 +5404,35 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
               ))}
             </div>
           </Card>
+
+          {/* SYSTEM INTEGRITY — developer notes, internal improvement layer */}
+          <Card className="bg-gradient-to-br from-zinc-900/40 to-black border-zinc-800/60">
+            <div className="flex items-center justify-between mb-3">
+              <SectionLabel>System integrity</SectionLabel>
+              <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500">
+                build {SYSTEM_INTEGRITY.buildDate} · v{SYSTEM_INTEGRITY.schemaVersion}
+              </span>
+            </div>
+            <div className="text-[11px] text-zinc-400 leading-relaxed mb-3">
+              Pilares ativos do protocolo v2. Estes são os 8 sinais que o Copilot e o sistema de selos monitoram.
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {SYSTEM_INTEGRITY.pillars.map((p) => (
+                <div key={p.id} className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded-full px-2 py-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500">{p.tag}</span>
+                  <span className="text-[10px] text-zinc-200 truncate">{p.label}</span>
+                </div>
+              ))}
+            </div>
+            {SYSTEM_INTEGRITY.deprecatedFields.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-zinc-800/60">
+                <div className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500 mb-1">Retirados do protocolo</div>
+                <div className="text-[11px] text-zinc-400">
+                  {SYSTEM_INTEGRITY.deprecatedFields.join(" · ")}
+                </div>
+              </div>
+            )}
+          </Card>
         </>
       )}
 
@@ -5826,7 +5928,7 @@ export default function SystemOS() {
         <div className="sticky top-0 z-30 bg-black/80 backdrop-blur-xl border-b border-zinc-900/80">
           <div className="px-5 py-3.5 flex items-center justify-between">
             <div>
-              <div className="text-[8px] tracking-[0.3em] text-emerald-400/80 uppercase font-bold">System OS</div>
+              <div className="text-[8px] tracking-[0.3em] text-emerald-400/80 uppercase font-bold">System OS · Longevity</div>
               <div className="text-[15px] font-bold tracking-tight leading-tight">DANILO FILHO</div>
             </div>
             <div className="flex items-center gap-2">
