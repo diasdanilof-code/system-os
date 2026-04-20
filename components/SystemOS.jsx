@@ -213,7 +213,7 @@ const makeProtocol = (overrides = {}) => ({
   dinnerTime: "20:00",
   sleepTarget: 7.5,
   goals: ["Maximizar performance", "Otimizar longevidade", "Reduzir LDL", "Estabilizar TSH"],
-  baseline: { weight: 82.0, age: 24, height: 1.83 },
+  baseline: { weight: 83.6, age: 24, height: 1.83 },
   biomarkers: {
     elevated: [
       { name: "LDL", priority: "alta", levers: ["ômega 3", "fibra solúvel", "cardio Z2", "azeite"] },
@@ -410,6 +410,10 @@ const makeBodyCompSnapshot = ({
   weight = null, bmi = null,
   bodyFatPct = null, leanMassKg = null, fatMassKg = null,
   waterPct = null, visceralFat = null, muscleKg = null,
+  // InBody-extended fields (all optional; backward-compatible)
+  totalBodyWaterL = null, proteinKg = null, mineralsKg = null,
+  waistHipRatio = null, bmrKcal = null, smi = null,
+  inBodyScore = null, device = null,
   notes = "", id,
 } = {}) => ({
   id: id || newId("body"),
@@ -418,22 +422,34 @@ const makeBodyCompSnapshot = ({
   source: "manual",
   date, label,
   weight, bmi, bodyFatPct, leanMassKg, fatMassKg,
-  waterPct, visceralFat, muscleKg, notes,
+  waterPct, visceralFat, muscleKg,
+  totalBodyWaterL, proteinKg, mineralsKg,
+  waistHipRatio, bmrKcal, smi, inBodyScore, device,
+  notes,
 });
 
 const DEFAULT_BODY_COMP_HISTORY = [
   makeBodyCompSnapshot({
-    id: "body-baseline",
-    date: "2026-04-15",
-    label: "Baseline",
-    weight: 82.0,
-    bodyFatPct: 18.2,
+    id: "body-inbody-20260420",
+    date: "2026-04-20",
+    label: "InBody 270 — 20/04/2026",
+    device: "InBody 270",
+    weight: 83.6,
+    bmi: 25.0,
+    bodyFatPct: 21.8,
     leanMassKg: 65.4,
-    fatMassKg: 14.9,
-    waterPct: 58.1,
-    visceralFat: 7,
-    muscleKg: 62.1,
-    bmi: 24.5,
+    fatMassKg: 18.2,
+    waterPct: Math.round((47.8 / 83.6) * 1000) / 10, // ≈57.2%
+    visceralFat: 8,
+    muscleKg: 37.1,
+    totalBodyWaterL: 47.8,
+    proteinKg: 12.9,
+    mineralsKg: 4.69,
+    waistHipRatio: 0.92,
+    bmrKcal: 1782,
+    smi: 8.3,
+    inBodyScore: 76,
+    notes: "Primeiro exame do experimento. PGC levemente acima; alvo baixar 6.7kg de gordura preservando massa magra.",
   }),
 ];
 
@@ -612,7 +628,36 @@ function useRepository() {
         if (entriesArr.length) setEntries(entriesArr);
         if (interventionsArr.length) setInterventions(interventionsArr);
         if (labsArr.length) setLabs(labsArr);
-        if (bodyCompArr.length) setBodyComp(bodyCompArr);
+        // --------------------------------------------------------
+        // One-time migrations (idempotent):
+        //  • Ensure real InBody 20/04/2026 exam is present.
+        //  • Bump baseline weight to 83.6 if still at 82.
+        // Each checks first, writes only if missing — safe to
+        // re-run on every load.
+        // --------------------------------------------------------
+        const EXAM_ID_INBODY_20260420 = "body-inbody-20260420";
+        const hasInBody = bodyCompArr.some(b => b.id === EXAM_ID_INBODY_20260420);
+        let effectiveBodyCompArr = bodyCompArr;
+        if (!hasInBody) {
+          const seed = DEFAULT_BODY_COMP_HISTORY.find(b => b.id === EXAM_ID_INBODY_20260420);
+          if (seed) {
+            try {
+              await tables.bodyComp.put(seed);
+              effectiveBodyCompArr = [...bodyCompArr, seed];
+            } catch (mErr) { logWriteErr(mErr); }
+          }
+        }
+        if (protocolRow && protocolRow.baseline && protocolRow.baseline.weight === 82 && protocolRow.baseline.age === 24) {
+          const patched = { ...protocolRow, baseline: { ...protocolRow.baseline, weight: 83.6 }, updatedAt: new Date().toISOString() };
+          try {
+            await tables.protocol.put(patched);
+            // eslint-disable-next-line no-unused-vars
+            const { id: _ignoredId2, ...cleanProtocol2 } = patched;
+            setProtocol(cleanProtocol2);
+          } catch (mErr) { logWriteErr(mErr); }
+        }
+
+        if (effectiveBodyCompArr.length) setBodyComp(effectiveBodyCompArr);
         if (supplementsArr.length) setSupplements(supplementsArr);
         if (weeklyArr.length) setWeeklySummaries(weeklyArr);
         setReady(true);
@@ -683,6 +728,37 @@ function useRepository() {
       }));
       if (updated) tables.entries.put(updated).catch(logWriteErr);
       return updated;
+    },
+    /**
+     * Ensure a DailyEntry exists for today's Brasília date.
+     * If the latest entry is NOT today, append a fresh one with day++.
+     * Idempotent: safe to call repeatedly (e.g., every 60s).
+     * Returns true if a new day was created, false otherwise.
+     */
+    ensureToday: () => {
+      const today = brToday();
+      let created = false;
+      let newEntry = null;
+      setEntries((prev) => {
+        if (!prev.length) return prev;
+        // Find the latest entry
+        let idx = 0;
+        let maxDate = prev[0].date || "";
+        for (let i = 1; i < prev.length; i++) {
+          if ((prev[i].date || "") > maxDate) { maxDate = prev[i].date || ""; idx = i; }
+        }
+        const latest = prev[idx];
+        if ((latest.date || "") >= today) return prev; // already have today (or future)
+        // Append new day
+        const nextDay = (latest.day || 0) + 1;
+        newEntry = makeDailyEntry(today, nextDay);
+        created = true;
+        return [...prev, newEntry];
+      });
+      if (created && newEntry) {
+        tables.entries.put(newEntry).catch(logWriteErr);
+      }
+      return created;
     },
     updateToday: (patch) => {
       let updated = null;
@@ -3019,7 +3095,12 @@ const StatMini = ({ label, value, unit, target, color }) => {
 // ============================================================
 // LOG — 3 fases
 // ============================================================
-const Log = ({ today, protocol, setTodayField }) => {
+const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
+  // Atomic patch helper — falls back to sequential setters if the
+  // new API is not provided (keeps older callers/screens safe).
+  const applyPatch = (patch) =>
+    setTodayFields ? setTodayFields(patch) :
+      Object.entries(patch).forEach(([k, v]) => setTodayField(k, v));
   const [phase, setPhase] = useState(currentPhase());
   return (
     <div className="space-y-5 pb-28">
@@ -3095,7 +3176,7 @@ const Log = ({ today, protocol, setTodayField }) => {
             </div>
             <Slider label="Qualidade do sono" value={today.sleepQ} onChange={(v) => setTodayField("sleepQ", v)} colorStops />
           </div>
-          <button onClick={() => setTodayField("morningLogged", true)}
+          <button onClick={() => applyPatch({ morningLogged: true })}
             className="w-full mt-5 py-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 font-semibold text-sm active:scale-[0.98]">
             Confirmar manhã
           </button>
@@ -3163,7 +3244,7 @@ const Log = ({ today, protocol, setTodayField }) => {
                 placeholder="Algo importante hoje…" />
             </div>
           </div>
-          <button onClick={() => { setTodayField("nightLogged", true); setTodayField("closed", true); }}
+          <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
             className="w-full mt-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98]">
             Fechar dia + gerar análise
           </button>
@@ -4992,6 +5073,103 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
             </div>
           </Card>
 
+          {/* BIOIMPEDÂNCIA — dentro da aba Exames */}
+          {(() => {
+            const latestBody = bodyComp && bodyComp.length ? bodyComp[bodyComp.length - 1] : null;
+            if (!latestBody) return null;
+            return (
+              <>
+                <Card>
+                  <div className="flex items-center justify-between mb-4">
+                    <SectionLabel>Bioimpedância</SectionLabel>
+                    <div className="flex items-center gap-2">
+                      {latestBody.device && (
+                        <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500">{latestBody.device}</span>
+                      )}
+                      <span className="text-[10px] text-zinc-500 font-semibold">{formatDateBR(latestBody.date)}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <BioField label="Peso" value={latestBody.weight} unit="kg" />
+                    <BioField label="IMC" value={latestBody.bmi} unit="kg/m²" />
+                    <BioField label="PGC" value={latestBody.bodyFatPct} unit="%" accent="amber" alert />
+                  </div>
+                </Card>
+
+                <Card>
+                  <SectionLabel>Composição corporal</SectionLabel>
+                  <div className="grid grid-cols-3 gap-2">
+                    <BioField label="Massa magra" value={latestBody.leanMassKg} unit="kg" good />
+                    <BioField label="Massa gorda" value={latestBody.fatMassKg} unit="kg" accent="amber" />
+                    <BioField label="Músculo esq." value={latestBody.muscleKg} unit="kg" good />
+                    {latestBody.proteinKg != null && (
+                      <BioField label="Proteína" value={latestBody.proteinKg} unit="kg" />
+                    )}
+                    {latestBody.mineralsKg != null && (
+                      <BioField label="Minerais" value={latestBody.mineralsKg} unit="kg" />
+                    )}
+                    {latestBody.totalBodyWaterL != null && (
+                      <BioField label="Água" value={latestBody.totalBodyWaterL} unit="L" />
+                    )}
+                  </div>
+                </Card>
+
+                <Card>
+                  <SectionLabel>Indicadores de risco</SectionLabel>
+                  <div className="grid grid-cols-3 gap-2">
+                    {latestBody.visceralFat != null && (
+                      <BioField
+                        label="Visceral"
+                        value={latestBody.visceralFat}
+                        unit="nível"
+                        accent={latestBody.visceralFat >= 10 ? "rose" : "emerald"}
+                        alert={latestBody.visceralFat >= 10}
+                      />
+                    )}
+                    {latestBody.waistHipRatio != null && (
+                      <BioField
+                        label="Cint/Qdril"
+                        value={latestBody.waistHipRatio}
+                        unit=""
+                        accent={latestBody.waistHipRatio >= 0.9 ? "amber" : "emerald"}
+                        alert={latestBody.waistHipRatio >= 0.9}
+                      />
+                    )}
+                    {latestBody.waterPct != null && (
+                      <BioField label="Água %" value={latestBody.waterPct} unit="%" />
+                    )}
+                  </div>
+                </Card>
+
+                {(latestBody.bmrKcal != null || latestBody.smi != null || latestBody.inBodyScore != null) && (
+                  <Card>
+                    <SectionLabel>Metabolismo + pontuação</SectionLabel>
+                    <div className="grid grid-cols-3 gap-2">
+                      {latestBody.bmrKcal != null && (
+                        <BioField label="TMB" value={latestBody.bmrKcal} unit="kcal" />
+                      )}
+                      {latestBody.smi != null && (
+                        <BioField label="SMI" value={latestBody.smi} unit="kg/m²" good />
+                      )}
+                      {latestBody.inBodyScore != null && (
+                        <BioField label="Score" value={latestBody.inBodyScore} unit="/100" />
+                      )}
+                    </div>
+                  </Card>
+                )}
+
+                {latestBody.notes && (
+                  <Card className="bg-gradient-to-br from-emerald-500/5 to-zinc-900/50 border-emerald-500/15">
+                    <div className="text-[9px] uppercase tracking-widest text-emerald-400/80 font-semibold mb-1.5">
+                      Observação
+                    </div>
+                    <div className="text-[12px] text-zinc-200 leading-relaxed">{latestBody.notes}</div>
+                  </Card>
+                )}
+              </>
+            );
+          })()}
+
           <Card className="bg-gradient-to-br from-blue-500/10 to-zinc-900/50 border-blue-500/20">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center">
@@ -4999,7 +5177,7 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
               </div>
               <div className="flex-1">
                 <div className="text-sm font-bold text-white">Próximo retest</div>
-                <div className="text-[11px] text-zinc-400">LDL + TSH em 45d · ALT/GGT em 60d</div>
+                <div className="text-[11px] text-zinc-400">LDL + TSH em 45d · ALT/GGT em 60d · Bioimpedância em 45d</div>
               </div>
             </div>
           </Card>
@@ -5399,6 +5577,39 @@ export default function SystemOS() {
   const repo = useRepository();
 
   // ------------------------------------------------------------
+  // DATE WATCHER — keeps `today` always equal to Brasília's current
+  // calendar day. Triggers:
+  //   1. On mount (once repo is ready)
+  //   2. Every 60 seconds while app is open
+  //   3. When tab/window becomes visible again (mobile + desktop)
+  // Why: without this, opening the app at 23:55 and leaving it open
+  // past midnight (or backgrounding overnight) keeps `today` stale.
+  // ------------------------------------------------------------
+  useEffect(() => {
+    if (!repo.ready) return;
+    const tick = () => {
+      try { repo.entries.ensureToday(); } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[dateWatcher] ensureToday failed:", err);
+      }
+    };
+    // Immediate check on mount / ready
+    tick();
+    // Periodic check every 60s
+    const intervalId = setInterval(tick, 60 * 1000);
+    // Re-check when app comes back to foreground
+    const onVisibility = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", tick);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", tick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo.ready]);
+
+  // ------------------------------------------------------------
   // SYSTEM STATE — composed by the Orchestrator.
   // Pipeline: repo.snapshot() → RuleEngine → AILayer → state.
   // UI consumes `systemState` (and its named sections) only.
@@ -5446,6 +5657,17 @@ export default function SystemOS() {
     repo.entries.updateToday({ [field]: value });
   };
 
+  /**
+   * setTodayFields — atomic multi-field update.
+   * Required when committing multiple fields in the same tick
+   * (e.g., Fechar dia sets nightLogged + closed together).
+   * Avoids the stale-closure race where two sequential
+   * setTodayField calls lose one of the writes.
+   */
+  const setTodayFields = (patch) => {
+    repo.entries.updateToday(patch);
+  };
+
   const updateProtocol = (nextProtocol) => {
     repo.protocol.replace(nextProtocol);
   };
@@ -5474,7 +5696,7 @@ export default function SystemOS() {
   const screens = {
     home: <HomeScreen entries={entries} today={today} protocol={protocol} ai={rules} setTab={setTab} setTodayField={setTodayField} openAISection={openAISection} />,
     check: <Checklist today={today} checklistState={checklistState} setChecklistState={setChecklistStateCompat} protocol={protocol} />,
-    log: <Log today={today} protocol={protocol} setTodayField={setTodayField} />,
+    log: <Log today={today} protocol={protocol} setTodayField={setTodayField} setTodayFields={setTodayFields} />,
     copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today} />,
     ai: <AI ai={rules} entries={entries} protocol={protocol} labs={labs} bodyComp={bodyComp} interventions={interventions} initialSection={aiInitialSection} />,
     profile: <Profile protocol={protocol} setProtocol={updateProtocol} labs={labs} bodyComp={bodyComp}
