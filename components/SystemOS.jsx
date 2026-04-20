@@ -175,10 +175,11 @@ function currentPhase() {
 
 const SCHEMA_VERSIONS = {
   protocol: 1,
-  // v2 (2026-04-20): fiber/brazilNuts dropped as protocol pillars.
-  //   Timestamps added: morningLoggedAt, nightLoggedAt, closedAt, updatedAt.
-  //   Seal/compliance version-gated: legacy v1 entries keep old predicate.
-  dailyEntry: 2,
+  // v3 (2026-04-20): 3-phase closure — morning/afternoon/night.
+  //   Adds afternoonClosed + afternoonClosedAt.
+  //   "Fechar noite" is the only action that sets closed=true.
+  // v2: fiber/brazilNuts dropped as protocol pillars, timestamps added.
+  dailyEntry: 3,
   intervention: 1,
   labSnapshot: 1,
   bodyCompSnapshot: 1,
@@ -322,6 +323,10 @@ const makeDailyEntry = (date, dayNum, overrides = {}) => ({
   fiber: false, brazilNuts: false,
   alcohol: false,
   finalEnergy: null, recovery: null, diet: null,
+  // 3-phase closure (schema v3). The day ends ONLY when nightLogged
+  // fires. Afternoon/morning closures are soft checkpoints — they
+  // don't block editing.
+  afternoonClosed: false, afternoonClosedAt: null,
   nightLogged: false, nightLoggedAt: null,
   notes: "",
   closed: false, closedAt: null,
@@ -821,6 +826,8 @@ function useRepository() {
             try {
               await tables.bodyComp.put(seed);
               effectiveBodyCompArr = [...mergedBodyComp, seed];
+              // Push InBody seed to cloud explicitly (critical baseline data).
+              try { syncRow("bodyComp", seed); } catch {}
             } catch (mErr) { logWriteErr(mErr); }
           }
         }
@@ -828,11 +835,24 @@ function useRepository() {
           const patched = { ...resolvedProtocolRow, baseline: { ...resolvedProtocolRow.baseline, weight: 83.6 }, updatedAt: new Date().toISOString() };
           try {
             await tables.protocol.put(patched);
+            try { syncRow("protocol", patched); } catch {}
             // eslint-disable-next-line no-unused-vars
             const { id: _ignoredId2, ...cleanProtocol2 } = patched;
             setProtocol(cleanProtocol2);
           } catch (mErr) { logWriteErr(mErr); }
         }
+
+        // One-time push: if cloud has no supplements but we have them locally,
+        // seed the cloud with the current stack (Creatina, Whey, Ômega 3, Mag, CoQ10).
+        try {
+          const cloudHasSupps = mergedSupplements.length > 0;
+          if (cloudHasSupps) {
+            mergedSupplements.forEach(s => { try { syncRow("supplements", s); } catch {} });
+          }
+          // Also push labs + bodyComp so cloud has full history mirrored
+          effectiveBodyCompArr.forEach(b => { try { syncRow("bodyComp", b); } catch {} });
+          mergedLabs.forEach(l => { try { syncRow("labs", l); } catch {} });
+        } catch {}
 
         if (effectiveBodyCompArr.length) setBodyComp(effectiveBodyCompArr);
         if (mergedSupplements.length) setSupplements(mergedSupplements);
@@ -981,6 +1001,7 @@ function useRepository() {
       // in this patch, stamp its *At timestamp automatically.
       const lifecycleStamps = {};
       if (patch.morningLogged === true && !latest.morningLoggedAt) lifecycleStamps.morningLoggedAt = now;
+      if (patch.afternoonClosed === true && !latest.afternoonClosedAt) lifecycleStamps.afternoonClosedAt = now;
       if (patch.nightLogged === true && !latest.nightLoggedAt) lifecycleStamps.nightLoggedAt = now;
       if (patch.closed === true && !latest.closedAt) lifecycleStamps.closedAt = now;
       const fullPatch = { ...patch, ...lifecycleStamps, updatedAt: now };
@@ -1026,6 +1047,7 @@ function useRepository() {
       const iv = payload.id && payload.version ? payload : makeIntervention(payload);
       setInterventions((prev) => [...prev, iv]);
       tables.interventions.put(iv).catch(logWriteErr);
+      try { syncRow("interventions", iv); } catch {}
       return iv;
     },
     update: (id, patch) => {
@@ -1034,6 +1056,7 @@ function useRepository() {
       const updated = { ...existing, ...patch };
       setInterventions((prev) => prev.map((iv) => (iv.id === id ? { ...iv, ...patch } : iv)));
       tables.interventions.put(updated).catch(logWriteErr);
+      try { syncRow("interventions", updated); } catch {}
       return updated;
     },
     remove: (id) => {
@@ -1061,6 +1084,7 @@ function useRepository() {
       const snap = payload.id && payload.version ? payload : makeLabSnapshot(payload);
       setLabs((prev) => [...prev, snap]);
       tables.labs.put(snap).catch(logWriteErr);
+      try { syncRow("labs", snap); } catch {}
       return snap;
     },
     update: (id, patch) => {
@@ -1069,6 +1093,7 @@ function useRepository() {
       const updated = { ...existing, ...patch };
       setLabs((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
       tables.labs.put(updated).catch(logWriteErr);
+      try { syncRow("labs", updated); } catch {}
       return updated;
     },
     remove: (id) => {
@@ -1096,6 +1121,7 @@ function useRepository() {
       const snap = payload.id && payload.version ? payload : makeBodyCompSnapshot(payload);
       setBodyComp((prev) => [...prev, snap]);
       tables.bodyComp.put(snap).catch(logWriteErr);
+      try { syncRow("bodyComp", snap); } catch {}
       return snap;
     },
     update: (id, patch) => {
@@ -1104,6 +1130,7 @@ function useRepository() {
       const updated = { ...existing, ...patch };
       setBodyComp((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
       tables.bodyComp.put(updated).catch(logWriteErr);
+      try { syncRow("bodyComp", updated); } catch {}
       return updated;
     },
     remove: (id) => {
@@ -1130,6 +1157,7 @@ function useRepository() {
       const supp = payload.id && payload.version ? payload : makeSupplement(payload);
       setSupplements((prev) => [...prev, supp]);
       tables.supplements.put(supp).catch(logWriteErr);
+      try { syncRow("supplements", supp); } catch {}
       return supp;
     },
     update: (id, patch) => {
@@ -1138,6 +1166,7 @@ function useRepository() {
       const updated = { ...existing, ...patch };
       setSupplements((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
       tables.supplements.put(updated).catch(logWriteErr);
+      try { syncRow("supplements", updated); } catch {}
       return updated;
     },
     discontinue: (id, untilDate = brToday()) => {
@@ -3489,6 +3518,18 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
               <Slider label="Fome" value={today.hunger} onChange={(v) => setTodayField("hunger", v)} />
               <Slider label="Desejos" value={today.cravings} onChange={(v) => setTodayField("cravings", v)} />
             </div>
+
+            {/* Fechar tarde — soft checkpoint, day stays editable until night */}
+            {today.afternoonClosed ? (
+              <div className="w-full mt-2 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
+                <Check size={15} strokeWidth={3} /> Tarde fechada
+              </div>
+            ) : (
+              <button onClick={() => applyPatch({ afternoonClosed: true })}
+                className="w-full mt-2 py-3 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-200 font-semibold text-sm active:scale-[0.98] flex items-center justify-center gap-2">
+                <Sun size={14} /> Fechar tarde
+              </button>
+            )}
           </Card>
         </>
       )}
@@ -3497,7 +3538,7 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
         <Card>
           <div className="flex items-center gap-2 mb-4">
             <Sunset size={14} className="text-indigo-400" />
-            <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Fechar dia</span>
+            <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Fechar noite · encerra o dia</span>
           </div>
           <div className="space-y-5">
             <Slider label="Energia final" value={today.finalEnergy} onChange={(v) => setTodayField("finalEnergy", v)} colorStops />
@@ -3512,39 +3553,57 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
           </div>
           {today.closed ? (
             <div className="w-full mt-5 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
-              <Check size={15} strokeWidth={3} /> Dia fechado · análise disponível
+              <Check size={15} strokeWidth={3} /> Noite fechada · dia encerrado
             </div>
           ) : (
             <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
-              className="w-full mt-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98]">
-              Fechar dia + gerar análise
+              className="w-full mt-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98] flex items-center justify-center gap-2">
+              <Moon size={14} /> Fechar noite · encerrar dia
             </button>
           )}
         </Card>
       )}
 
-      {/* CONFIRM DAY — sempre visível no final do Log, fase independente.
-          Permite fechar o dia a qualquer momento (ex: se dormiu cedo). */}
-      {!today.closed && phase !== "night" && (
-        <Card className="bg-gradient-to-br from-indigo-500/5 to-zinc-900/60 border-indigo-500/20">
-          <div className="flex items-center gap-2 mb-2">
-            <Sunset size={14} className="text-indigo-400" />
-            <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Fechar dia agora</span>
+      {/* CLOSURE STATUS — mostra progresso das 3 fases, sempre visível.
+          Dia só fecha com "Fechar noite". */}
+      {!today.closed && (
+        <Card className="bg-gradient-to-br from-zinc-900/60 to-black border-zinc-800">
+          <div className="flex items-center gap-2 mb-3">
+            <Clock size={14} className="text-zinc-400" />
+            <span className="text-[10px] uppercase tracking-[0.22em] text-zinc-400 font-semibold">Progresso do dia</span>
           </div>
-          <p className="text-[12px] text-zinc-400 leading-relaxed mb-3">
-            Confirme quando quiser encerrar o dia. Todos os registros são salvos
-            e o selo é computado com base nos critérios do protocolo.
-          </p>
-          <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
-            className="w-full py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98] flex items-center justify-center gap-2">
-            <Check size={15} strokeWidth={2.5} /> Confirmar dia
-          </button>
+          <div className="grid grid-cols-3 gap-2">
+            <div className={`rounded-xl border px-2 py-2.5 text-center ${today.morningLogged ? "bg-emerald-500/10 border-emerald-500/30" : "bg-zinc-950 border-zinc-800"}`}>
+              <Sunrise size={12} className={`mx-auto mb-1 ${today.morningLogged ? "text-emerald-400" : "text-zinc-600"}`} />
+              <div className={`text-[9px] uppercase tracking-widest font-semibold ${today.morningLogged ? "text-emerald-400" : "text-zinc-500"}`}>Manhã</div>
+              <div className={`text-[10px] font-semibold mt-0.5 ${today.morningLogged ? "text-emerald-200" : "text-zinc-600"}`}>
+                {today.morningLogged ? "fechada" : "aberta"}
+              </div>
+            </div>
+            <div className={`rounded-xl border px-2 py-2.5 text-center ${today.afternoonClosed ? "bg-emerald-500/10 border-emerald-500/30" : "bg-zinc-950 border-zinc-800"}`}>
+              <Sun size={12} className={`mx-auto mb-1 ${today.afternoonClosed ? "text-emerald-400" : "text-zinc-600"}`} />
+              <div className={`text-[9px] uppercase tracking-widest font-semibold ${today.afternoonClosed ? "text-emerald-400" : "text-zinc-500"}`}>Tarde</div>
+              <div className={`text-[10px] font-semibold mt-0.5 ${today.afternoonClosed ? "text-emerald-200" : "text-zinc-600"}`}>
+                {today.afternoonClosed ? "fechada" : "aberta"}
+              </div>
+            </div>
+            <div className={`rounded-xl border px-2 py-2.5 text-center ${today.closed ? "bg-emerald-500/10 border-emerald-500/30" : "bg-zinc-950 border-zinc-800"}`}>
+              <Moon size={12} className={`mx-auto mb-1 ${today.closed ? "text-emerald-400" : "text-zinc-600"}`} />
+              <div className={`text-[9px] uppercase tracking-widest font-semibold ${today.closed ? "text-emerald-400" : "text-zinc-500"}`}>Noite</div>
+              <div className={`text-[10px] font-semibold mt-0.5 ${today.closed ? "text-emerald-200" : "text-zinc-600"}`}>
+                {today.closed ? "fechada" : "aberta"}
+              </div>
+            </div>
+          </div>
+          <div className="text-[10px] text-zinc-500 mt-3 leading-relaxed">
+            Todos os campos continuam editáveis até o dia virar. A noite é quem encerra o dia oficialmente.
+          </div>
         </Card>
       )}
 
       {today.closed && phase !== "night" && (
         <div className="w-full py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
-          <Check size={15} strokeWidth={3} /> Dia confirmado
+          <Check size={15} strokeWidth={3} /> Dia encerrado · abra amanhã
         </div>
       )}
     </div>
