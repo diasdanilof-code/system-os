@@ -4432,6 +4432,237 @@ const CopilotCard = ({ icon: Icon, label, source, children, loading }) => (
   </div>
 );
 
+// ============================================================
+// STRATEGIST CARD — Blueprint-style protocol council
+// ------------------------------------------------------------
+// Multi-horizon output: TODAY / NEXT FEW DAYS / ADVANCED.
+// Includes protocol + app self-review sections.
+// On-demand (button). Cached 6h server-side.
+// ============================================================
+const PILLAR_META = {
+  sleep:        { label: "SLEEP",        color: "text-indigo-400", bg: "bg-indigo-500/10 border-indigo-500/25" },
+  recovery:     { label: "RECOVERY",     color: "text-cyan-400",   bg: "bg-cyan-500/10 border-cyan-500/25" },
+  exercise:     { label: "EXERCISE",     color: "text-emerald-400",bg: "bg-emerald-500/10 border-emerald-500/25" },
+  nutrition:    { label: "NUTRITION",    color: "text-amber-400",  bg: "bg-amber-500/10 border-amber-500/25" },
+  measurement:  { label: "MEASUREMENT",  color: "text-blue-400",   bg: "bg-blue-500/10 border-blue-500/25" },
+  intervention: { label: "INTERVENTION", color: "text-rose-400",   bg: "bg-rose-500/10 border-rose-500/25" },
+  longevity:    { label: "LONGEVITY",    color: "text-fuchsia-400",bg: "bg-fuchsia-500/10 border-fuchsia-500/25" },
+};
+
+const PillarChip = ({ pillar }) => {
+  const m = PILLAR_META[pillar] || { label: (pillar || "—").toUpperCase(), color: "text-zinc-400", bg: "bg-zinc-800 border-zinc-700" };
+  return (
+    <span className={`text-[8px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded-full border ${m.bg} ${m.color}`}>
+      {m.label}
+    </span>
+  );
+};
+
+const StrategistCard = ({ state, onRun }) => {
+  const { data, loading, source, error } = state;
+
+  // Empty state — show CTA.
+  if (!data && !loading) {
+    return (
+      <div className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-zinc-900/70 to-black p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
+              <Compass size={14} className="text-emerald-400" />
+            </div>
+            <div>
+              <div className="text-[9px] uppercase tracking-widest text-emerald-400/80 font-semibold">Strategist</div>
+              <div className="text-[14px] font-bold text-white leading-tight">Conselho estratégico</div>
+            </div>
+          </div>
+          <span className="text-[8px] uppercase tracking-widest font-semibold text-zinc-500">
+            on-demand
+          </span>
+        </div>
+        <p className="text-[12px] text-zinc-300 leading-relaxed mb-3">
+          Conselho completo em 3 horizontes: <span className="text-white font-semibold">hoje</span>,
+          <span className="text-white font-semibold"> próximos dias</span> e
+          <span className="text-white font-semibold"> opções avançadas</span>.
+          Inclui revisão do protocolo e do próprio app.
+        </p>
+        <button onClick={onRun}
+          className="w-full py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-semibold text-sm active:scale-[0.98] flex items-center justify-center gap-2">
+          <Compass size={14} strokeWidth={2.5} /> Gerar conselho
+        </button>
+        {error && (
+          <div className="text-[10px] text-rose-400 mt-2 text-center">{error}</div>
+        )}
+      </div>
+    );
+  }
+
+  // Loading state.
+  if (loading) {
+    return (
+      <div className="rounded-2xl border border-emerald-500/30 bg-zinc-900/60 p-5 text-center">
+        <div className="inline-flex items-center gap-2 text-[11px] uppercase tracking-widest text-emerald-400 font-semibold">
+          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          Pensando estrategicamente…
+        </div>
+        <div className="text-[11px] text-zinc-500 mt-2">
+          Analisando dados contra framework Blueprint
+        </div>
+      </div>
+    );
+  }
+
+  // Full render.
+  const { horizon_today = [], horizon_next_days = [], horizon_advanced = [], protocol_review, app_review } = data;
+
+  return (
+    <div className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-zinc-900/70 to-black p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
+            <Compass size={14} className="text-emerald-400" />
+          </div>
+          <div>
+            <div className="text-[9px] uppercase tracking-widest text-emerald-400/80 font-semibold">Strategist</div>
+            <div className="text-[14px] font-bold text-white leading-tight">Conselho estratégico</div>
+          </div>
+        </div>
+        <button onClick={onRun}
+          className="text-[10px] uppercase tracking-widest font-semibold text-emerald-400/70 hover:text-emerald-300">
+          ↻ Regerar
+        </button>
+      </div>
+
+      {/* TODAY */}
+      {horizon_today.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-white mb-2">Hoje</div>
+          <ul className="space-y-2">
+            {horizon_today.map((it, i) => (
+              <li key={i} className="rounded-xl bg-black/40 border border-zinc-800 p-3">
+                <div className="flex items-start gap-2 mb-1">
+                  <span className="text-[12px] font-semibold text-white flex-1">{it.action}</span>
+                </div>
+                <div className="text-[11px] text-zinc-400 leading-relaxed mb-1.5">{it.why}</div>
+                <div className="flex items-center gap-1.5">
+                  <PillarChip pillar={it.pillar} />
+                  <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500">{it.tag}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* NEXT FEW DAYS */}
+      {horizon_next_days.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-white mb-2">Próximos dias</div>
+          <ul className="space-y-2">
+            {horizon_next_days.map((it, i) => (
+              <li key={i} className="rounded-xl bg-black/40 border border-zinc-800 p-3">
+                <div className="flex items-start gap-2 mb-1">
+                  <span className="text-[12px] font-semibold text-white flex-1">{it.action}</span>
+                  <span className="text-[9px] font-semibold text-zinc-500 tabular-nums bg-zinc-900 border border-zinc-800 rounded-full px-1.5 py-0.5 whitespace-nowrap">
+                    {it.duration_days}d
+                  </span>
+                </div>
+                <div className="text-[11px] text-zinc-400 leading-relaxed mb-1.5">{it.why}</div>
+                <div className="flex items-center gap-1.5">
+                  <PillarChip pillar={it.pillar} />
+                  <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500">{it.tag}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* ADVANCED */}
+      {horizon_advanced.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-white mb-2">Opções avançadas</div>
+          <ul className="space-y-2">
+            {horizon_advanced.map((it, i) => (
+              <li key={i} className="rounded-xl bg-black/40 border border-zinc-800 p-3">
+                <div className="flex items-start gap-2 mb-1.5">
+                  <span className="text-[9px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 whitespace-nowrap">
+                    {it.category}
+                  </span>
+                  <span className="text-[12px] font-semibold text-white flex-1 leading-snug">{it.title}</span>
+                </div>
+                <div className="text-[11px] text-zinc-300 leading-relaxed mb-1">{it.detail}</div>
+                <div className="text-[10px] text-zinc-500 leading-relaxed mb-1.5 italic">{it.rationale}</div>
+                <div className="flex items-center gap-1.5">
+                  <PillarChip pillar={it.pillar} />
+                  <span className="text-[9px] uppercase tracking-widest font-semibold text-zinc-500">{it.tag}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* PROTOCOL REVIEW */}
+      {protocol_review && (
+        <div className="mt-4 pt-4 border-t border-zinc-800/60">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-white mb-2">Revisão do protocolo</div>
+          <div className="space-y-1.5">
+            {protocol_review.working && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-emerald-400 font-semibold">Funcionando</div>
+                <div className="text-[11px] text-zinc-200">{protocol_review.working}</div>
+              </div>
+            )}
+            {protocol_review.underperforming && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-amber-400 font-semibold">Underperforming</div>
+                <div className="text-[11px] text-zinc-200">{protocol_review.underperforming}</div>
+              </div>
+            )}
+            {protocol_review.simplify_idea && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-zinc-400 font-semibold">Simplificar</div>
+                <div className="text-[11px] text-zinc-200">{protocol_review.simplify_idea}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* APP REVIEW */}
+      {app_review && (app_review.missing_data || app_review.noise || app_review.add_next) && (
+        <div className="mt-4 pt-4 border-t border-zinc-800/60">
+          <div className="text-[10px] uppercase tracking-widest font-bold text-white mb-2">Revisão do app</div>
+          <div className="space-y-1.5">
+            {app_review.missing_data && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-blue-400 font-semibold">Dado ausente</div>
+                <div className="text-[11px] text-zinc-200">{app_review.missing_data}</div>
+              </div>
+            )}
+            {app_review.noise && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-rose-400 font-semibold">Noise</div>
+                <div className="text-[11px] text-zinc-200">{app_review.noise}</div>
+              </div>
+            )}
+            {app_review.add_next && (
+              <div>
+                <div className="text-[9px] uppercase tracking-widest text-zinc-400 font-semibold">Adicionar</div>
+                <div className="text-[11px] text-zinc-200">{app_review.add_next}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="text-center text-[8px] uppercase tracking-widest text-zinc-600 font-semibold pt-3 mt-3 border-t border-zinc-900">
+        {source === "ai" ? "gerado via IA · cache 6h" : "fallback local"}
+      </div>
+    </div>
+  );
+};
+
 const CopilotTab = ({ ai, entries, protocol, today }) => {
   const enabled = ai?.ready === true;
 
@@ -4478,12 +4709,53 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
     patterns: (ai?.patterns || []).map(p => ({ title: p.title, tag: p.tag })),
   }), [ai]);
 
+  // Strategist context — denser payload; sent only on explicit demand
+  // (button click) since the endpoint is more expensive than the others.
+  const strategistCtx = useMemo(() => ({
+    day: today?.day,
+    days_logged: entries?.filter(e => e.closed)?.length ?? 0,
+    today_state: {
+      sleep_hours: today?.sleepH, sleep_quality: today?.sleepQ,
+      training: !!today?.training, sauna: !!today?.sauna,
+      hbot: !!today?.hbot, red_light: !!today?.redLight,
+      alcohol: !!today?.alcohol,
+      recovery: today?.recovery, diet: today?.diet,
+      energy: today?.energy, focus: today?.focus,
+      mood: today?.mood, stress: today?.stress,
+      hunger: today?.hunger, cravings: today?.cravings,
+    },
+    metrics: ai?.metrics,
+    scores: ai?.scores ? {
+      energy: ai.scores.energy?.current,
+      recovery: ai.scores.recovery?.current,
+      metabolic: ai.scores.metabolic?.current,
+    } : null,
+    tomorrow_plan: (ai?.tomorrowPlan || []).slice(0, 3).map(p => ({ priority: p.priority, action: p.action, tag: p.tag })),
+    patterns: (ai?.patterns || []).slice(0, 5).map(p => ({ title: p.title, tag: p.tag })),
+    current_supplements: protocol?.supplements?.map?.(s => s.name) || [
+      "Creatina", "Whey", "Ômega 3", "Magnésio", "CoQ10",
+    ],
+    biomarkers_flagged: ["LDL", "TSH", "ALT/GGT"],
+  }), [today, ai, entries, protocol]);
+
   const brief = useCopilotSection("brief", briefCtx, enabled);
   const tomorrow = useCopilotSection("tomorrow", tomorrowCtx, enabled && (ai?.tomorrowPlan?.length > 0));
   const rootCause = useCopilotSection("rootCause", rootCauseCtx, enabled);
   const weekly = useCopilotSection("weekly", weeklyCtx, enabled);
   const experiment = useCopilotSection("experiment", experimentCtx, enabled);
   const patterns = useCopilotSection("patterns", patternsCtx, enabled && (ai?.patterns?.length > 0));
+
+  // Strategist — on-demand (not auto-fetched).
+  const [strategistState, setStrategistState] = useState({ loading: false, data: null, source: null, error: null });
+  const runStrategist = async () => {
+    setStrategistState((s) => ({ ...s, loading: true, error: null }));
+    const res = await fetchCopilot("strategist", strategistCtx);
+    if (res && res.ok) {
+      setStrategistState({ loading: false, data: res.data, source: "ai", error: null });
+    } else {
+      setStrategistState({ loading: false, data: null, source: "fallback", error: res?.error || "AI indisponível" });
+    }
+  };
 
   // Deterministic "Next Best Action" — derived locally, no AI call
   const nextBestAction = useMemo(() => {
@@ -4528,6 +4800,12 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
           Respostas geradas via IA, com fallback determinístico caso a rede falhe.
         </div>
       </div>
+
+      {/* STRATEGIST — conselho integral em 3 horizontes (on-demand) */}
+      <StrategistCard
+        state={strategistState}
+        onRun={runStrategist}
+      />
 
       {/* 1) Today Brief */}
       <CopilotCard icon={Sparkles} label="Today Brief" source={brief.source} loading={brief.loading}>
