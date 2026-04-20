@@ -3176,10 +3176,16 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
             </div>
             <Slider label="Qualidade do sono" value={today.sleepQ} onChange={(v) => setTodayField("sleepQ", v)} colorStops />
           </div>
-          <button onClick={() => applyPatch({ morningLogged: true })}
-            className="w-full mt-5 py-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 font-semibold text-sm active:scale-[0.98]">
-            Confirmar manhã
-          </button>
+          {today.morningLogged ? (
+            <div className="w-full mt-5 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
+              <Check size={15} strokeWidth={3} /> Manhã confirmada
+            </div>
+          ) : (
+            <button onClick={() => applyPatch({ morningLogged: true })}
+              className="w-full mt-5 py-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 font-semibold text-sm active:scale-[0.98]">
+              Confirmar manhã
+            </button>
+          )}
         </Card>
       )}
 
@@ -3244,10 +3250,16 @@ const Log = ({ today, protocol, setTodayField, setTodayFields }) => {
                 placeholder="Algo importante hoje…" />
             </div>
           </div>
-          <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
-            className="w-full mt-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98]">
-            Fechar dia + gerar análise
-          </button>
+          {today.closed ? (
+            <div className="w-full mt-5 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-200 font-semibold text-sm flex items-center justify-center gap-2">
+              <Check size={15} strokeWidth={3} /> Dia fechado · análise disponível
+            </div>
+          ) : (
+            <button onClick={() => applyPatch({ nightLogged: true, closed: true })}
+              className="w-full mt-5 py-3 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold text-sm active:scale-[0.98]">
+              Fechar dia + gerar análise
+            </button>
+          )}
         </Card>
       )}
     </div>
