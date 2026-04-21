@@ -678,23 +678,34 @@ function dedupeEntriesByDate(entriesArr) {
       byDate.set(e.date, e);
       continue;
     }
-    // Decide winner: most recent updatedAt, else most non-null fields
+    // Winner selection priority (critical for data-integrity):
+    //   1. Entry with higher `day` wins (day>0 beats day=0 for same date,
+    //      because protocol-numbered rows carry intent, not stale seeds).
+    //   2. Entry with more non-null fields wins.
+    //   3. Entry with most recent updatedAt wins.
+    //
+    // Previous version used updatedAt first, which let a late-written
+    // day=0 "ghost" entry overwrite a legit day=1 entry — producing the
+    // "pré-lançamento" bug after Sheets pulled re-hydrated old rows.
+    const eDay = Number(e.day) || 0;
+    const xDay = Number(existing.day) || 0;
+    const eFilled = Object.values(e).filter(v => v !== null && v !== "" && v !== false).length;
+    const xFilled = Object.values(existing).filter(v => v !== null && v !== "" && v !== false).length;
     const eUpdated = e.updatedAt || "";
     const xUpdated = existing.updatedAt || "";
     let winner, loser;
-    if (eUpdated && xUpdated) {
-      if (eUpdated > xUpdated) { winner = e; loser = existing; }
-      else { winner = existing; loser = e; }
+    if (eDay !== xDay) {
+      winner = eDay > xDay ? e : existing;
+    } else if (eFilled !== xFilled) {
+      winner = eFilled > xFilled ? e : existing;
+    } else if (eUpdated && xUpdated) {
+      winner = eUpdated > xUpdated ? e : existing;
     } else if (eUpdated) {
-      winner = e; loser = existing;
-    } else if (xUpdated) {
-      winner = existing; loser = e;
+      winner = e;
     } else {
-      const eFilled = Object.values(e).filter(v => v !== null && v !== "").length;
-      const xFilled = Object.values(existing).filter(v => v !== null && v !== "").length;
-      winner = eFilled >= xFilled ? e : existing;
-      loser = winner === e ? existing : e;
+      winner = existing;
     }
+    loser = winner === e ? existing : e;
     // Merge: fill winner's nulls from loser
     const merged = { ...winner };
     for (const k of Object.keys(loser)) {
