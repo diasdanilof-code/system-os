@@ -5585,7 +5585,258 @@ const Interventions = ({ interventions, setInterventions, ai }) => {
 // ============================================================
 // PROFILE — Body Data Layer
 // ============================================================
-const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, interventions, entries, setTab }) => {
+// ============================================================
+// CRUD MODALS — Stack / Labs / BodyComp
+// Each modal is a full-bleed sheet with a form + save/cancel.
+// Kept stateless here; parent controls open/close + handles save.
+// ============================================================
+
+const ModalShell = ({ title, subtitle, icon: Icon, onCancel, onSave, disabled, children }) => (
+  <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div className="bg-zinc-950 border border-zinc-800 rounded-t-3xl sm:rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div className="sticky top-0 bg-zinc-950/95 backdrop-blur-xl border-b border-zinc-800/60 px-5 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
+            <Icon size={16} className="text-emerald-400" />
+          </div>
+          <div>
+            <div className="text-sm font-bold text-white">{title}</div>
+            {subtitle && <div className="text-[11px] text-zinc-500">{subtitle}</div>}
+          </div>
+        </div>
+        <button onClick={onCancel} className="w-9 h-9 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center active:scale-95">
+          <X size={15} className="text-zinc-400" />
+        </button>
+      </div>
+      <div className="px-5 py-5 space-y-4">{children}</div>
+      <div className="sticky bottom-0 bg-zinc-950/95 backdrop-blur-xl border-t border-zinc-800/60 px-5 py-4 flex gap-2">
+        <button onClick={onCancel}
+          className="flex-1 py-3 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 font-semibold text-sm active:scale-[0.98]">
+          Cancelar
+        </button>
+        <button onClick={onSave} disabled={disabled}
+          className="flex-1 py-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 font-semibold text-sm active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100">
+          Salvar
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+const Field = ({ label, hint, children }) => (
+  <label className="block">
+    <div className="flex items-baseline justify-between mb-1.5">
+      <span className="text-[10px] uppercase tracking-widest text-zinc-400 font-semibold">{label}</span>
+      {hint && <span className="text-[9px] text-zinc-600">{hint}</span>}
+    </div>
+    {children}
+  </label>
+);
+
+const TextInput = (props) => (
+  <input {...props}
+    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500/50 placeholder:text-zinc-600" />
+);
+
+const NumInput = (props) => (
+  <input type="number" inputMode="decimal" step="any" {...props}
+    className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 text-white text-sm text-center tabular-nums focus:outline-none focus:border-emerald-500/50 placeholder:text-zinc-600" />
+);
+
+const AddSupplementModal = ({ onCancel, onSave }) => {
+  const [draft, setDraft] = useState({
+    name: "", dose: "", timing: "Manhã", purpose: "", since: brToday(),
+  });
+  const valid = draft.name.trim().length > 0;
+  return (
+    <ModalShell title="Adicionar suplemento" subtitle="Novo item no stack"
+      icon={Pill} onCancel={onCancel}
+      onSave={() => valid && onSave(draft)} disabled={!valid}>
+      <Field label="Nome" hint="obrigatório">
+        <TextInput value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Ex: NAC" />
+      </Field>
+      <Field label="Dose" hint="ex: 600mg, 5g, 1 cap">
+        <TextInput value={draft.dose} onChange={(e) => setDraft({ ...draft, dose: e.target.value })} placeholder="600mg" />
+      </Field>
+      <Field label="Timing" hint="quando toma">
+        <select value={draft.timing} onChange={(e) => setDraft({ ...draft, timing: e.target.value })}
+          className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500/50">
+          <option>Manhã</option>
+          <option>Pré-treino</option>
+          <option>Pós-treino</option>
+          <option>Almoço</option>
+          <option>Refeições</option>
+          <option>Tarde</option>
+          <option>Noite</option>
+          <option>Pré-sono</option>
+        </select>
+      </Field>
+      <Field label="Propósito" hint="para que serve">
+        <TextInput value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })} placeholder="Ex: LDL, fígado, sono" />
+      </Field>
+      <Field label="Desde" hint="data de início">
+        <TextInput type="date" value={draft.since} onChange={(e) => setDraft({ ...draft, since: e.target.value })} />
+      </Field>
+    </ModalShell>
+  );
+};
+
+const AddLabModal = ({ onCancel, onSave }) => {
+  const [draft, setDraft] = useState({
+    date: brToday(), label: "",
+    lipids: {}, metabolic: {}, liver: {}, thyroid: {}, inflammation: {}, vitamins: {},
+    notes: "",
+  });
+  const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  const setNested = (group, key, v) => setDraft({ ...draft, [group]: { ...draft[group], [key]: num(v) } });
+  const valid = draft.date && draft.date.length === 10;
+  const save = () => {
+    const payload = {
+      date: draft.date,
+      label: draft.label || `Exame ${formatDateBR(draft.date)}`,
+      lipids: draft.lipids, metabolic: draft.metabolic, liver: draft.liver,
+      thyroid: draft.thyroid, inflammation: draft.inflammation, vitamins: draft.vitamins,
+      notes: draft.notes,
+    };
+    onSave(payload);
+  };
+  return (
+    <ModalShell title="Adicionar exame de sangue" subtitle="Painel completo"
+      icon={Beaker} onCancel={onCancel} onSave={save} disabled={!valid}>
+      <Field label="Data"><TextInput type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></Field>
+      <Field label="Label" hint="opcional"><TextInput value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} placeholder="Ex: Painel 45d" /></Field>
+
+      <div className="text-[10px] uppercase tracking-widest text-rose-400 font-semibold pt-2">Lipídios (mg/dL)</div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="LDL"><NumInput value={draft.lipids.ldl ?? ""} onChange={(e) => setNested("lipids", "ldl", e.target.value)} /></Field>
+        <Field label="HDL"><NumInput value={draft.lipids.hdl ?? ""} onChange={(e) => setNested("lipids", "hdl", e.target.value)} /></Field>
+        <Field label="Trigs"><NumInput value={draft.lipids.triglycerides ?? ""} onChange={(e) => setNested("lipids", "triglycerides", e.target.value)} /></Field>
+        <Field label="Colesterol total"><NumInput value={draft.lipids.totalChol ?? ""} onChange={(e) => setNested("lipids", "totalChol", e.target.value)} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-blue-400 font-semibold pt-2">Metabólico</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Glicose"><NumInput value={draft.metabolic.glucose ?? ""} onChange={(e) => setNested("metabolic", "glucose", e.target.value)} /></Field>
+        <Field label="HbA1c" hint="%"><NumInput value={draft.metabolic.hba1c ?? ""} onChange={(e) => setNested("metabolic", "hba1c", e.target.value)} /></Field>
+        <Field label="Insulina"><NumInput value={draft.metabolic.insulin ?? ""} onChange={(e) => setNested("metabolic", "insulin", e.target.value)} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-amber-400 font-semibold pt-2">Fígado (U/L)</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="ALT"><NumInput value={draft.liver.alt ?? ""} onChange={(e) => setNested("liver", "alt", e.target.value)} /></Field>
+        <Field label="AST"><NumInput value={draft.liver.ast ?? ""} onChange={(e) => setNested("liver", "ast", e.target.value)} /></Field>
+        <Field label="GGT"><NumInput value={draft.liver.ggt ?? ""} onChange={(e) => setNested("liver", "ggt", e.target.value)} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-indigo-400 font-semibold pt-2">Tireoide</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="TSH" hint="μIU/mL"><NumInput value={draft.thyroid.tsh ?? ""} onChange={(e) => setNested("thyroid", "tsh", e.target.value)} /></Field>
+        <Field label="T4 livre" hint="ng/dL"><NumInput value={draft.thyroid.t4 ?? ""} onChange={(e) => setNested("thyroid", "t4", e.target.value)} /></Field>
+        <Field label="T3 total" hint="pg/mL"><NumInput value={draft.thyroid.t3 ?? ""} onChange={(e) => setNested("thyroid", "t3", e.target.value)} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-zinc-400 font-semibold pt-2">Inflamação + vitaminas</div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="PCR" hint="mg/L"><NumInput value={draft.inflammation.crp ?? ""} onChange={(e) => setNested("inflammation", "crp", e.target.value)} /></Field>
+        <Field label="Homocisteína" hint="μmol/L"><NumInput value={draft.inflammation.homocysteine ?? ""} onChange={(e) => setNested("inflammation", "homocysteine", e.target.value)} /></Field>
+        <Field label="Vit D" hint="ng/mL"><NumInput value={draft.vitamins.vitD ?? ""} onChange={(e) => setNested("vitamins", "vitD", e.target.value)} /></Field>
+        <Field label="B12" hint="pg/mL"><NumInput value={draft.vitamins.b12 ?? ""} onChange={(e) => setNested("vitamins", "b12", e.target.value)} /></Field>
+      </div>
+
+      <Field label="Notas" hint="opcional">
+        <textarea value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} rows={2}
+          className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 text-white text-sm resize-none focus:outline-none focus:border-emerald-500/50"
+          placeholder="Observações do médico ou contexto" />
+      </Field>
+    </ModalShell>
+  );
+};
+
+const AddBodyCompModal = ({ onCancel, onSave }) => {
+  const [draft, setDraft] = useState({
+    date: brToday(), label: "", device: "InBody 270",
+    weight: "", bmi: "", bodyFatPct: "", leanMassKg: "", fatMassKg: "",
+    waterPct: "", visceralFat: "", muscleKg: "",
+    totalBodyWaterL: "", proteinKg: "", mineralsKg: "",
+    waistHipRatio: "", bmrKcal: "", smi: "", inBodyScore: "",
+    notes: "",
+  });
+  const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  const valid = draft.date && draft.date.length === 10 && draft.weight !== "";
+  const save = () => {
+    const payload = {
+      date: draft.date,
+      label: draft.label || `Bioimpedância ${formatDateBR(draft.date)}`,
+      device: draft.device,
+      weight: num(draft.weight), bmi: num(draft.bmi),
+      bodyFatPct: num(draft.bodyFatPct),
+      leanMassKg: num(draft.leanMassKg),
+      fatMassKg: num(draft.fatMassKg),
+      waterPct: num(draft.waterPct),
+      visceralFat: num(draft.visceralFat),
+      muscleKg: num(draft.muscleKg),
+      totalBodyWaterL: num(draft.totalBodyWaterL),
+      proteinKg: num(draft.proteinKg),
+      mineralsKg: num(draft.mineralsKg),
+      waistHipRatio: num(draft.waistHipRatio),
+      bmrKcal: num(draft.bmrKcal),
+      smi: num(draft.smi),
+      inBodyScore: num(draft.inBodyScore),
+      notes: draft.notes,
+    };
+    onSave(payload);
+  };
+  return (
+    <ModalShell title="Adicionar bioimpedância" subtitle="InBody / Tanita / outro"
+      icon={Gauge} onCancel={onCancel} onSave={save} disabled={!valid}>
+      <Field label="Data"><TextInput type="date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></Field>
+      <Field label="Aparelho" hint="modelo">
+        <TextInput value={draft.device} onChange={(e) => setDraft({ ...draft, device: e.target.value })} placeholder="InBody 270" />
+      </Field>
+
+      <div className="text-[10px] uppercase tracking-widest text-emerald-400 font-semibold pt-2">Básico</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Peso" hint="kg"><NumInput value={draft.weight} onChange={(e) => setDraft({ ...draft, weight: e.target.value })} /></Field>
+        <Field label="IMC" hint="kg/m²"><NumInput value={draft.bmi} onChange={(e) => setDraft({ ...draft, bmi: e.target.value })} /></Field>
+        <Field label="PGC" hint="%"><NumInput value={draft.bodyFatPct} onChange={(e) => setDraft({ ...draft, bodyFatPct: e.target.value })} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-cyan-400 font-semibold pt-2">Composição</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Massa magra" hint="kg"><NumInput value={draft.leanMassKg} onChange={(e) => setDraft({ ...draft, leanMassKg: e.target.value })} /></Field>
+        <Field label="Massa gorda" hint="kg"><NumInput value={draft.fatMassKg} onChange={(e) => setDraft({ ...draft, fatMassKg: e.target.value })} /></Field>
+        <Field label="Músculo esq." hint="kg"><NumInput value={draft.muscleKg} onChange={(e) => setDraft({ ...draft, muscleKg: e.target.value })} /></Field>
+        <Field label="Proteína" hint="kg"><NumInput value={draft.proteinKg} onChange={(e) => setDraft({ ...draft, proteinKg: e.target.value })} /></Field>
+        <Field label="Minerais" hint="kg"><NumInput value={draft.mineralsKg} onChange={(e) => setDraft({ ...draft, mineralsKg: e.target.value })} /></Field>
+        <Field label="Água" hint="L"><NumInput value={draft.totalBodyWaterL} onChange={(e) => setDraft({ ...draft, totalBodyWaterL: e.target.value })} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-rose-400 font-semibold pt-2">Risco</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Visceral" hint="nível"><NumInput value={draft.visceralFat} onChange={(e) => setDraft({ ...draft, visceralFat: e.target.value })} /></Field>
+        <Field label="Cint/Qdril"><NumInput value={draft.waistHipRatio} onChange={(e) => setDraft({ ...draft, waistHipRatio: e.target.value })} /></Field>
+        <Field label="Água %"><NumInput value={draft.waterPct} onChange={(e) => setDraft({ ...draft, waterPct: e.target.value })} /></Field>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-zinc-400 font-semibold pt-2">Metabolismo + score</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="TMB" hint="kcal"><NumInput value={draft.bmrKcal} onChange={(e) => setDraft({ ...draft, bmrKcal: e.target.value })} /></Field>
+        <Field label="SMI" hint="kg/m²"><NumInput value={draft.smi} onChange={(e) => setDraft({ ...draft, smi: e.target.value })} /></Field>
+        <Field label="Score" hint="/100"><NumInput value={draft.inBodyScore} onChange={(e) => setDraft({ ...draft, inBodyScore: e.target.value })} /></Field>
+      </div>
+
+      <Field label="Notas" hint="opcional">
+        <textarea value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} rows={2}
+          className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5 text-white text-sm resize-none focus:outline-none focus:border-emerald-500/50"
+          placeholder="Contexto ou observação" />
+      </Field>
+    </ModalShell>
+  );
+};
+
+const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, interventions, entries, setTab, onAddSupplement, onAddLab, onAddBodyComp }) => {
+  // CRUD modal state — one at a time (supp / lab / body)
+  const [openAddModal, setOpenAddModal] = useState(null); // "supp" | "lab" | "body" | null
   const [section, setSection] = useState("baseline");
   const latestLab = labs[labs.length - 1];
   const latestBody = bodyComp[bodyComp.length - 1];
@@ -5602,6 +5853,26 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
 
   return (
     <div className="space-y-5 pb-28">
+      {/* CRUD MODALS */}
+      {openAddModal === "supp" && (
+        <AddSupplementModal
+          onCancel={() => setOpenAddModal(null)}
+          onSave={(payload) => { onAddSupplement && onAddSupplement(payload); setOpenAddModal(null); }}
+        />
+      )}
+      {openAddModal === "lab" && (
+        <AddLabModal
+          onCancel={() => setOpenAddModal(null)}
+          onSave={(payload) => { onAddLab && onAddLab(payload); setOpenAddModal(null); }}
+        />
+      )}
+      {openAddModal === "body" && (
+        <AddBodyCompModal
+          onCancel={() => setOpenAddModal(null)}
+          onSave={(payload) => { onAddBodyComp && onAddBodyComp(payload); setOpenAddModal(null); }}
+        />
+      )}
+
       {/* Hero */}
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-zinc-900 to-black border border-zinc-800/80 p-5">
         <div className="absolute -top-10 -right-10 w-40 h-40 bg-blue-500/10 rounded-full blur-3xl" />
@@ -5704,6 +5975,22 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
       {/* LABS */}
       {section === "labs" && (
         <>
+          {/* Quick-add buttons */}
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => setOpenAddModal("lab")}
+              className="flex flex-col items-center gap-1 p-3 rounded-2xl bg-gradient-to-br from-blue-500/10 to-zinc-900/40 border border-blue-500/20 active:scale-[0.98] transition-all">
+              <Beaker size={16} className="text-blue-400" />
+              <span className="text-[11px] font-bold text-white">+ Exame de sangue</span>
+              <span className="text-[9px] text-zinc-500">Painel completo</span>
+            </button>
+            <button onClick={() => setOpenAddModal("body")}
+              className="flex flex-col items-center gap-1 p-3 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-zinc-900/40 border border-emerald-500/20 active:scale-[0.98] transition-all">
+              <Gauge size={16} className="text-emerald-400" />
+              <span className="text-[11px] font-bold text-white">+ Bioimpedância</span>
+              <span className="text-[9px] text-zinc-500">InBody / Tanita</span>
+            </button>
+          </div>
+
           <Card>
             <div className="flex items-center justify-between mb-4">
               <SectionLabel>Painel metabólico</SectionLabel>
@@ -5867,27 +6154,48 @@ const Profile = ({ protocol, setProtocol, labs, bodyComp, supplements, intervent
 
       {/* SUPPLEMENTS */}
       {section === "supps" && (
-        <Card>
-          <SectionLabel>Stack atual</SectionLabel>
-          <div className="space-y-2">
-            {supplements.map((s, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 bg-zinc-800/30 rounded-xl border border-zinc-800/60">
-                <Pill size={14} className="text-blue-400 mt-1" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-white">{s.name}</span>
-                    <span className="text-[10px] text-zinc-500">{s.dose}</span>
-                  </div>
-                  <div className="text-[10px] text-zinc-500 mt-0.5">{s.purpose}</div>
-                  <div className="text-[9px] text-zinc-600 mt-0.5">Desde {formatDateBR(s.since)}</div>
-                </div>
-                <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md text-blue-300 border border-blue-500/20 bg-zinc-900/60 flex-shrink-0">
-                  {s.timing}
-                </span>
+        <>
+          <button onClick={() => setOpenAddModal("supp")}
+            className="w-full flex items-center justify-between p-4 rounded-2xl bg-gradient-to-r from-blue-500/10 to-zinc-900/40 border border-blue-500/20 active:scale-[0.98] transition-all">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center">
+                <PlusCircle size={18} className="text-blue-400" />
               </div>
-            ))}
-          </div>
-        </Card>
+              <div className="text-left">
+                <div className="text-sm font-bold text-white">Adicionar suplemento</div>
+                <div className="text-[11px] text-zinc-400">Nome, dose, timing, propósito</div>
+              </div>
+            </div>
+            <ChevronRight size={18} className="text-zinc-500" />
+          </button>
+
+          <Card>
+            <SectionLabel>Stack atual ({supplements.length})</SectionLabel>
+            <div className="space-y-2">
+              {supplements.length === 0 && (
+                <div className="text-[11px] text-zinc-500 py-4 text-center">
+                  Nenhum suplemento cadastrado. Adicione o primeiro acima.
+                </div>
+              )}
+              {supplements.map((s, i) => (
+                <div key={s.id || i} className="flex items-start gap-3 p-3 bg-zinc-800/30 rounded-xl border border-zinc-800/60">
+                  <Pill size={14} className="text-blue-400 mt-1" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-white">{s.name}</span>
+                      <span className="text-[10px] text-zinc-500">{s.dose}</span>
+                    </div>
+                    <div className="text-[10px] text-zinc-500 mt-0.5">{s.purpose}</div>
+                    <div className="text-[9px] text-zinc-600 mt-0.5">Desde {formatDateBR(s.since)}</div>
+                  </div>
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md text-blue-300 border border-blue-500/20 bg-zinc-900/60 flex-shrink-0">
+                    {s.timing}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </>
       )}
 
       {/* FLAGS */}
@@ -6409,6 +6717,12 @@ export default function SystemOS() {
     repo.checklist.replaceAll(next);
   };
 
+  // Add-handlers for Profile CRUD (Stack / Labs / BodyComp).
+  // Each passes through to the repository — which syncs IDB + Sheets.
+  const addSupplement = (payload) => repo.supplements.add(payload);
+  const addLab = (payload) => repo.labs.add(payload);
+  const addBodyComp = (payload) => repo.bodyComp.add(payload);
+
   // ------------------------------------------------------------
   // SCREENS — UI receives the same props as before. The `ai` prop
   // is now sourced from SystemState.rules (RuleEngine output +
@@ -6421,7 +6735,8 @@ export default function SystemOS() {
     copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today} />,
     ai: <AI ai={rules} entries={entries} protocol={protocol} labs={labs} bodyComp={bodyComp} interventions={interventions} initialSection={aiInitialSection} />,
     profile: <Profile protocol={protocol} setProtocol={updateProtocol} labs={labs} bodyComp={bodyComp}
-      supplements={supplements} interventions={interventions} entries={entries} setTab={setTab} />,
+      supplements={supplements} interventions={interventions} entries={entries} setTab={setTab}
+      onAddSupplement={addSupplement} onAddLab={addLab} onAddBodyComp={addBodyComp} />,
     interventions: <Interventions interventions={interventions} setInterventions={setInterventionsCompat} ai={rules} />,
     plan: <Plan protocol={protocol} setProtocol={updateProtocol} entries={entries} interventions={interventions} />,
   };
