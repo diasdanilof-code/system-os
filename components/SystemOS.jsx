@@ -310,7 +310,7 @@ const makeDailyEntry = (date, dayNum, overrides = {}) => ({
   createdAt: new Date().toISOString(),
   updatedAt: null,          // set by updateToday on every write
   source: "manual",
-  day: dayNum,
+  day: typeof dayNum === "number" ? dayNum : (Number(dayNum) || 0),
   date,
   dateLabel: formatDateBR(date),
   weight: null, sleepH: null, sleepQ: null,
@@ -999,7 +999,10 @@ function useRepository() {
       if ((latest.date || "") >= today) return false; // already future/today
 
       // --- DAY ROLLOVER ---
-      const nextDay = (latest.day || 0) + 1;
+      // DAY_NUMBER_COERCE_V1 — force Number() to prevent string concat bug
+      // (bug: if latest.day was "2" string from Sheets sync, "2" + 1 = "21")
+      const latestDayNum = typeof latest.day === "number" ? latest.day : (Number(latest.day) || 0);
+      const nextDay = latestDayNum + 1;
       const latestSnapshot = {
         ...latest,
         checklistSnapshot: {
