@@ -18,7 +18,7 @@ import {
   Briefcase, Settings, Sunrise, Sunset, Edit3, User, FlaskConical,
   Beaker, Microscope, Gauge, Layers, Shield, Lightbulb, Compass,
   Clock, BarChart3, Cpu, Bookmark, TrendingDown, Pencil, X, Trash2,
-  ChefHat, Waves, Stethoscope, Replace, PlusCircle,
+  ChefHat, Waves, Stethoscope, Replace, PlusCircle, MessageCircle,
 } from "lucide-react";
 
 /* ============================================================
@@ -6924,6 +6924,247 @@ export default function SystemOS() {
   const addLab = (payload) => repo.labs.add(payload);
   const addBodyComp = (payload) => repo.bodyComp.add(payload);
 
+
+/* ============================================================
+ * CHAT_TAB_COMPONENT_V8 — Conversational AI expert in biohacking
+ * Standalone: no dependency on existing flow. Zero mutation.
+ * ============================================================ */
+const ChatTab = ({ labs = [], bodyComp = [], supplements = [], entries = [], protocol, today }) => {
+  const [messages, setMessages] = React.useState(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem("chat_history_v8") : null;
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  const [input, setInput] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [suggestions, setSuggestions] = React.useState([
+    "Quais exames devo fazer para aprimorar meu acompanhamento?",
+    "Quais os melhores suplementos para o meu LDL?",
+    "Como melhorar meu InBody nas próximas 4 semanas?",
+  ]);
+  const scrollRef = React.useRef(null);
+
+  React.useEffect(() => {
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("chat_history_v8", JSON.stringify(messages.slice(-40)));
+      }
+    } catch {}
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages]);
+
+  const buildUserContext = () => {
+    const latestLab = Array.isArray(labs) && labs.length > 0
+      ? [...labs].sort((a,b) => String(b.date).localeCompare(String(a.date)))[0]
+      : null;
+    const sortedBody = Array.isArray(bodyComp) && bodyComp.length > 0
+      ? [...bodyComp].sort((a,b) => String(b.date).localeCompare(String(a.date)))
+      : [];
+    const latestBody = sortedBody[0] || null;
+    const prevBody = sortedBody[1] || null;
+    const delta = latestBody && prevBody ? {
+      weight: (Number(latestBody.weight) || 0) - (Number(prevBody.weight) || 0),
+      pbf: (Number(latestBody.pbf) || 0) - (Number(prevBody.pbf) || 0),
+      mm: (Number(latestBody.muscleMass) || 0) - (Number(prevBody.muscleMass) || 0),
+    } : null;
+    const flagged = [];
+    if (latestLab?.lipids?.ldl > 130) flagged.push("LDL");
+    if (latestLab?.thyroid?.tsh > 2.5) flagged.push("TSH");
+    if (latestLab?.liver?.alt > 25) flagged.push("ALT");
+    if (latestLab?.liver?.ggt > 20) flagged.push("GGT");
+    const recent = Array.isArray(entries) ? entries.slice(-7) : [];
+    const avg = (arr, key) => {
+      const vs = arr.map(e => Number(e?.[key])).filter(n => !isNaN(n) && n > 0);
+      return vs.length ? vs.reduce((a,b) => a+b, 0) / vs.length : null;
+    };
+    return {
+      latest_lab: latestLab,
+      latest_body_comp: latestBody,
+      body_comp_delta: delta,
+      current_supplements: (supplements || []).map(s => s?.name || s).filter(Boolean),
+      biomarkers_flagged: flagged,
+      sleep_avg_7d: avg(recent, "sleepHours"),
+      recovery_avg_7d: avg(recent, "recovery"),
+      day_index: today?.day || 0,
+    };
+  };
+
+  const send = async (text) => {
+    const msg = String(text || input).trim();
+    if (!msg || loading) return;
+    const newMessages = [...messages, { role: "user", content: msg, ts: Date.now() }];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+    try {
+      const body = {
+        message: msg,
+        history: messages.slice(-10),
+        user_context: buildUserContext(),
+      };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 28000);
+      const res = await fetch("/api/copilot/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const json = await res.json();
+      if (json?.ok && json?.data?.answer) {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          content: json.data.answer,
+          refs: json.data.refs || [],
+          ts: Date.now(),
+        }]);
+        if (Array.isArray(json.data.follow_up_suggestions) && json.data.follow_up_suggestions.length > 0) {
+          setSuggestions(json.data.follow_up_suggestions.slice(0,3));
+        }
+      } else {
+        setMessages(prev => [...prev, {
+          role: "assistant",
+          content: "⚠️ IA indisponível agora. Tente novamente em instantes.",
+          error: true, ts: Date.now(),
+        }]);
+      }
+    } catch (err) {
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: "⚠️ Erro de conexão. Verifique sua rede e tente de novo.",
+        error: true, ts: Date.now(),
+      }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const clearHistory = () => {
+    if (typeof window !== "undefined") window.localStorage.removeItem("chat_history_v8");
+    setMessages([]);
+  };
+
+  const ctx = buildUserContext();
+  const hasData = (ctx.latest_lab || ctx.latest_body_comp);
+
+  return (
+    <div className="space-y-4 pb-28">
+      {/* Header */}
+      <div>
+        <div className="text-[9px] uppercase tracking-[0.25em] text-emerald-400/80 font-semibold mb-1">
+          Chat · IA Expert
+        </div>
+        <div className="text-xl font-bold tracking-tight">Pergunte qualquer coisa</div>
+        <div className="text-[11px] text-zinc-500 mt-1">
+          Biohacking · Blueprint · Seus exames e InBody
+        </div>
+      </div>
+
+      {/* Data indicator */}
+      {hasData && (
+        <div className="rounded-2xl border border-emerald-900/30 bg-emerald-950/10 p-3 text-[11px] text-emerald-300/80">
+          IA está vendo: {ctx.latest_lab?.lipids?.ldl && `LDL ${ctx.latest_lab.lipids.ldl}`}
+          {ctx.latest_lab?.thyroid?.tsh && ` · TSH ${ctx.latest_lab.thyroid.tsh}`}
+          {ctx.latest_body_comp?.weight && ` · ${ctx.latest_body_comp.weight}kg`}
+          {ctx.latest_body_comp?.pbf && ` · PBF ${ctx.latest_body_comp.pbf}%`}
+          {ctx.biomarkers_flagged?.length > 0 && ` · Flags: ${ctx.biomarkers_flagged.join(", ")}`}
+        </div>
+      )}
+
+      {/* Messages */}
+      <div
+        ref={scrollRef}
+        className="rounded-2xl border border-zinc-900 bg-zinc-950/50 p-3 space-y-3 overflow-y-auto"
+        style={{ maxHeight: "55vh", minHeight: "200px" }}
+      >
+        {messages.length === 0 && (
+          <div className="text-[12px] text-zinc-500 text-center py-6">
+            Comece com uma das sugestões abaixo ou escreva sua própria pergunta.
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+            <div className={
+              m.role === "user"
+                ? "max-w-[85%] rounded-2xl bg-emerald-600/20 border border-emerald-700/30 px-3 py-2 text-[13px] text-emerald-100"
+                : m.error
+                ? "max-w-[90%] rounded-2xl bg-rose-950/30 border border-rose-900/40 px-3 py-2 text-[13px] text-rose-200"
+                : "max-w-[90%] rounded-2xl bg-zinc-900/80 border border-zinc-800 px-3 py-2 text-[13px] text-zinc-100 whitespace-pre-wrap leading-relaxed"
+            }>
+              {m.content}
+              {m.refs && m.refs.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-zinc-800/60 text-[10px] text-zinc-500">
+                  ref: {m.refs.join(" · ")}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="max-w-[80%] rounded-2xl bg-zinc-900/60 border border-zinc-800 px-3 py-2 text-[12px] text-zinc-400 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" style={{ animationDelay: "150ms" }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" style={{ animationDelay: "300ms" }} />
+              pensando...
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Suggestions */}
+      {!loading && suggestions.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {suggestions.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => send(s)}
+              className="text-[11px] px-3 py-1.5 rounded-full border border-zinc-800 bg-zinc-950/50 text-zinc-300 hover:bg-zinc-900"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div className="flex gap-2 items-end">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          placeholder="Pergunte sobre exames, rotina, suplementos, treino..."
+          rows={2}
+          className="flex-1 rounded-2xl bg-zinc-950 border border-zinc-800 px-3 py-2 text-[13px] text-white placeholder-zinc-600 resize-none focus:outline-none focus:border-emerald-700"
+        />
+        <button
+          onClick={() => send()}
+          disabled={loading || !input.trim()}
+          className="px-4 py-2 rounded-2xl bg-emerald-600 text-white text-[12px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Enviar
+        </button>
+      </div>
+
+      {messages.length > 0 && (
+        <button
+          onClick={clearHistory}
+          className="text-[10px] text-zinc-600 hover:text-zinc-400 underline"
+        >
+          Limpar histórico
+        </button>
+      )}
+    </div>
+  );
+};
+
   // ------------------------------------------------------------
   // SCREENS — UI receives the same props as before. The `ai` prop
   // is now sourced from SystemState.rules (RuleEngine output +
@@ -6935,6 +7176,7 @@ export default function SystemOS() {
     log: <Log today={today} protocol={protocol} setTodayField={setTodayField} setTodayFields={setTodayFields} />,
     copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today}
       labs={labs} bodyComp={bodyComp} supplements={supplements} />,
+    chat: <ChatTab labs={labs} bodyComp={bodyComp} supplements={supplements} entries={entries} protocol={protocol} today={today} />,
     ai: <AI ai={rules} entries={entries} protocol={protocol} labs={labs} bodyComp={bodyComp} interventions={interventions} initialSection={aiInitialSection} />,
     profile: <Profile protocol={protocol} setProtocol={updateProtocol} labs={labs} bodyComp={bodyComp}
       supplements={supplements} interventions={interventions} entries={entries} setTab={setTab}
@@ -6948,6 +7190,7 @@ export default function SystemOS() {
     { key: "check", label: "Check", icon: CheckSquare, layer: "exec" },
     { key: "log", label: "Log", icon: Plus, primary: true, layer: "exec" },
     { key: "copilot", label: "Copilot", icon: Sparkles, layer: "intel" },
+    { key: "chat", label: "Chat", icon: MessageCircle, layer: "intel" },
     { key: "profile", label: "Perfil", icon: User, layer: "body" },
   ];
 
