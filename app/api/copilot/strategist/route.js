@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { callOpenAI } from "@/lib/openai";
-import { STRATEGIST } from "@/lib/copilotPrompts";
+import { CORE_CONTEXT, STRATEGIST } from "@/lib/copilotPrompts";
+import { buildSystemPrompt, contextToQueryText } from "@/lib/promptBuilder";
 import { cacheKey, cacheGet, cacheSet } from "@/lib/copilotCache";
 
 export const runtime = "nodejs";
@@ -13,13 +14,19 @@ export async function POST(req) {
     const cached = cacheGet(key);
     if (cached) return NextResponse.json({ ok: true, data: cached, cached: true });
 
+    // Strategist uses full-context query — pull more sections (denser coverage)
+    const queryText = contextToQueryText(body);
+    const systemPrompt = buildSystemPrompt({
+      coreContext: CORE_CONTEXT + STRATEGIST.instructions,
+      input: queryText + " sleep recovery exercise nutrition supplement intervention measurement",
+      maxSections: 6, // strategist needs widest context
+    });
+
     const data = await callOpenAI({
-      system: STRATEGIST.system,
+      system: systemPrompt,
       input: body,
       schema: STRATEGIST.schema,
       schemaName: STRATEGIST.schemaName,
-      // Strategist emits a dense multi-horizon object — needs more tokens
-      // and slightly longer timeout than the 6 default routes.
       maxOutputTokens: 2000,
       timeoutMs: 22000,
     });

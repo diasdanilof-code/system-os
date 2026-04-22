@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { callOpenAI } from "@/lib/openai";
-import { TODAY_BRIEF } from "@/lib/copilotPrompts";
+import { CORE_CONTEXT, TODAY_BRIEF } from "@/lib/copilotPrompts";
+import { buildSystemPrompt, contextToQueryText } from "@/lib/promptBuilder";
 import { cacheKey, cacheGet, cacheSet } from "@/lib/copilotCache";
 
 export const runtime = "nodejs";
@@ -13,8 +14,15 @@ export async function POST(req) {
     const cached = cacheGet(key);
     if (cached) return NextResponse.json({ ok: true, data: cached, cached: true });
 
+    const queryText = contextToQueryText(body);
+    const systemPrompt = buildSystemPrompt({
+      coreContext: CORE_CONTEXT + TODAY_BRIEF.instructions,
+      input: queryText + " sleep recovery exercise nutrition",
+      maxSections: 3,
+    });
+
     const data = await callOpenAI({
-      system: TODAY_BRIEF.system,
+      system: systemPrompt,
       input: body,
       schema: TODAY_BRIEF.schema,
       schemaName: TODAY_BRIEF.schemaName,

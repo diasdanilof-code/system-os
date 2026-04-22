@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { callOpenAI } from "@/lib/openai";
-import { WEEKLY_INSIGHT } from "@/lib/copilotPrompts";
+import { CORE_CONTEXT, WEEKLY_INSIGHT } from "@/lib/copilotPrompts";
+import { buildSystemPrompt, contextToQueryText } from "@/lib/promptBuilder";
 import { cacheKey, cacheGet, cacheSet } from "@/lib/copilotCache";
 
 export const runtime = "nodejs";
@@ -13,8 +14,15 @@ export async function POST(req) {
     const cached = cacheGet(key);
     if (cached) return NextResponse.json({ ok: true, data: cached, cached: true });
 
+    const queryText = contextToQueryText(body);
+    const systemPrompt = buildSystemPrompt({
+      coreContext: CORE_CONTEXT + WEEKLY_INSIGHT.instructions,
+      input: queryText + " weekly review integrity",
+      maxSections: 4,
+    });
+
     const data = await callOpenAI({
-      system: WEEKLY_INSIGHT.system,
+      system: systemPrompt,
       input: body,
       schema: WEEKLY_INSIGHT.schema,
       schemaName: WEEKLY_INSIGHT.schemaName,
