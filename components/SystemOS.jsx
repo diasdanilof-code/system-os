@@ -4907,10 +4907,64 @@ const StrategistCard = ({ state, onRun }) => {
   );
 };
 
-const CopilotTab = ({ ai, entries, protocol, today }) => {
+const CopilotTab = ({ ai, entries, protocol, today, labs = [], bodyComp = [], supplements = [] }) => {
   const enabled = ai?.ready === true;
 
+  // Build biomarker snapshot: latest lab values, flagged markers, bodyComp trend
+  const biomarkerSnapshot = useMemo(() => {
+    const latestLab = labs && labs.length ? labs[labs.length - 1] : null;
+    const latestBody = bodyComp && bodyComp.length ? bodyComp[bodyComp.length - 1] : null;
+    const firstBody = bodyComp && bodyComp.length > 1 ? bodyComp[0] : null;
+
+    // Flag elevated markers (hardcoded thresholds — aligned with prompt knowledge base)
+    const flagged = [];
+    if (latestLab) {
+      if (latestLab.lipids?.ldl != null && latestLab.lipids.ldl > 130) flagged.push("LDL");
+      if (latestLab.lipids?.totalChol != null && latestLab.lipids.totalChol > 200) flagged.push("Colesterol total");
+      if (latestLab.thyroid?.tsh != null && latestLab.thyroid.tsh > 2.5) flagged.push("TSH");
+      if (latestLab.liver?.alt != null && latestLab.liver.alt > 25) flagged.push("ALT");
+      if (latestLab.liver?.ggt != null && latestLab.liver.ggt > 50) flagged.push("GGT");
+      if (latestLab.liver?.ast != null && latestLab.liver.ast > 25) flagged.push("AST");
+      if (latestLab.metabolic?.hba1c != null && latestLab.metabolic.hba1c > 5.5) flagged.push("HbA1c");
+      if (latestLab.metabolic?.glucose != null && latestLab.metabolic.glucose > 100) flagged.push("Glicose");
+      if (latestLab.inflammation?.crp != null && latestLab.inflammation.crp > 1) flagged.push("hsCRP");
+      if (latestLab.vitamins?.vitD != null && latestLab.vitamins.vitD < 40) flagged.push("Vit D baixa");
+      if (latestLab.vitamins?.b12 != null && latestLab.vitamins.b12 < 400) flagged.push("B12 baixa");
+    }
+
+    // BodyComp delta (composição corporal — trend entre primeiro e último)
+    const bodyCompDelta = (latestBody && firstBody && latestBody.id !== firstBody.id) ? {
+      weight_delta: latestBody.weight != null && firstBody.weight != null ? +(latestBody.weight - firstBody.weight).toFixed(1) : null,
+      fatPct_delta: latestBody.bodyFatPct != null && firstBody.bodyFatPct != null ? +(latestBody.bodyFatPct - firstBody.bodyFatPct).toFixed(1) : null,
+      leanMass_delta: latestBody.leanMassKg != null && firstBody.leanMassKg != null ? +(latestBody.leanMassKg - firstBody.leanMassKg).toFixed(1) : null,
+      visceral_delta: latestBody.visceralFat != null && firstBody.visceralFat != null ? +(latestBody.visceralFat - firstBody.visceralFat).toFixed(0) : null,
+      days: firstBody.date && latestBody.date ? Math.round((new Date(latestBody.date) - new Date(firstBody.date)) / 86400000) : null,
+    } : null;
+
+    return {
+      latestLab: latestLab ? {
+        date: latestLab.date, label: latestLab.label,
+        lipids: latestLab.lipids, metabolic: latestLab.metabolic,
+        liver: latestLab.liver, thyroid: latestLab.thyroid,
+        inflammation: latestLab.inflammation, vitamins: latestLab.vitamins,
+      } : null,
+      latestBody: latestBody ? {
+        date: latestBody.date, label: latestBody.label, device: latestBody.device,
+        weight: latestBody.weight, bmi: latestBody.bmi, bodyFatPct: latestBody.bodyFatPct,
+        leanMassKg: latestBody.leanMassKg, fatMassKg: latestBody.fatMassKg,
+        visceralFat: latestBody.visceralFat, muscleKg: latestBody.muscleKg,
+        waterPct: latestBody.waterPct, waistHipRatio: latestBody.waistHipRatio,
+        bmrKcal: latestBody.bmrKcal, smi: latestBody.smi, inBodyScore: latestBody.inBodyScore,
+      } : null,
+      bodyCompDelta,
+      flagged_biomarkers: flagged,
+      lab_count: labs.length,
+      bodyComp_count: bodyComp.length,
+    };
+  }, [labs, bodyComp]);
+
   // Contexts sent to each API (lean payloads — no PII beyond health data already in this repo)
+  // All contexts now enriched with real biomarker snapshot from user's IDB.
   const briefCtx = useMemo(() => ({
     day: today?.day,
     sleep_hours: today?.sleepH,
@@ -4919,13 +4973,15 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
     energy: today?.energy,
     adherence: ai?.metrics?.compliance,
     phase: currentPhase(),
-  }), [today, ai]);
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+  }), [today, ai, biomarkerSnapshot]);
 
   const tomorrowCtx = useMemo(() => ({
     plan: (ai?.tomorrowPlan || []).slice(0, 3).map(p => ({
       priority: p.priority, action: p.action, tag: p.tag,
     })),
-  }), [ai]);
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+  }), [ai, biomarkerSnapshot]);
 
   const rootCauseCtx = useMemo(() => ({
     metrics: ai?.metrics,
@@ -4936,22 +4992,33 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
       recovery: ai.scores.recovery?.current,
       metabolic: ai.scores.metabolic?.current,
     } : null,
-  }), [ai, entries]);
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+    latest_lab: biomarkerSnapshot.latestLab,
+    latest_body_comp: biomarkerSnapshot.latestBody,
+  }), [ai, entries, biomarkerSnapshot]);
 
   const weeklyCtx = useMemo(() => ({
     metrics: ai?.metrics,
     weekEvolution: ai?.weekEvolution,
-  }), [ai]);
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+    body_comp_delta: biomarkerSnapshot.bodyCompDelta,
+  }), [ai, biomarkerSnapshot]);
 
   const experimentCtx = useMemo(() => ({
     compliance: ai?.metrics?.compliance,
     weak_areas: (ai?.patterns || []).slice(0, 3).map(p => ({ title: p.title, tag: p.tag })),
-    current_supplements: protocol?.supplements?.map?.(s => s.name) || [],
-  }), [ai, protocol]);
+    current_supplements: supplements && supplements.length > 0
+      ? supplements.map(s => ({ name: s.name, dose: s.dose, timing: s.timing, purpose: s.purpose }))
+      : (protocol?.supplements?.map?.(s => s.name) || []),
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+    latest_lab: biomarkerSnapshot.latestLab,
+    latest_body_comp: biomarkerSnapshot.latestBody,
+  }), [ai, protocol, supplements, biomarkerSnapshot]);
 
   const patternsCtx = useMemo(() => ({
     patterns: (ai?.patterns || []).map(p => ({ title: p.title, tag: p.tag })),
-  }), [ai]);
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers,
+  }), [ai, biomarkerSnapshot]);
 
   // Strategist context — denser payload; sent only on explicit demand
   // (button click) since the endpoint is more expensive than the others.
@@ -4976,11 +5043,19 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
     } : null,
     tomorrow_plan: (ai?.tomorrowPlan || []).slice(0, 3).map(p => ({ priority: p.priority, action: p.action, tag: p.tag })),
     patterns: (ai?.patterns || []).slice(0, 5).map(p => ({ title: p.title, tag: p.tag })),
-    current_supplements: protocol?.supplements?.map?.(s => s.name) || [
-      "Creatina", "Whey", "Ômega 3", "Magnésio", "CoQ10",
-    ],
-    biomarkers_flagged: ["LDL", "TSH", "ALT/GGT"],
-  }), [today, ai, entries, protocol]);
+    // REAL biomarker data from user's IDB (not hardcoded)
+    current_supplements: supplements && supplements.length > 0
+      ? supplements.map(s => ({ name: s.name, dose: s.dose, timing: s.timing, purpose: s.purpose }))
+      : (protocol?.supplements?.map?.(s => s.name) || []),
+    biomarkers_flagged: biomarkerSnapshot.flagged_biomarkers.length > 0
+      ? biomarkerSnapshot.flagged_biomarkers
+      : ["LDL", "TSH", "ALT/GGT"],
+    latest_lab: biomarkerSnapshot.latestLab,
+    latest_body_comp: biomarkerSnapshot.latestBody,
+    body_comp_delta: biomarkerSnapshot.bodyCompDelta,
+    lab_count: biomarkerSnapshot.lab_count,
+    body_comp_count: biomarkerSnapshot.bodyComp_count,
+  }), [today, ai, entries, protocol, supplements, biomarkerSnapshot]);
 
   const brief = useCopilotSection("brief", briefCtx, enabled);
   const tomorrow = useCopilotSection("tomorrow", tomorrowCtx, enabled && (ai?.tomorrowPlan?.length > 0));
@@ -5044,6 +5119,132 @@ const CopilotTab = ({ ai, entries, protocol, today }) => {
           Respostas geradas via IA, com fallback determinístico caso a rede falhe.
         </div>
       </div>
+
+      {/* BIOMARCADORES REAIS — snapshot do que a IA está vendo */}
+      {(biomarkerSnapshot.lab_count > 0 || biomarkerSnapshot.bodyComp_count > 0) && (
+        <div className="rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900/80 to-black p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Beaker size={12} className="text-emerald-400" />
+              <span className="text-[10px] uppercase tracking-widest text-emerald-400/80 font-semibold">Dados alimentando a IA</span>
+            </div>
+            <span className="text-[9px] text-zinc-500 font-semibold">
+              {biomarkerSnapshot.lab_count} exame{biomarkerSnapshot.lab_count !== 1 ? "s" : ""} · {biomarkerSnapshot.bodyComp_count} bioimpedância
+              {biomarkerSnapshot.bodyComp_count !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          {biomarkerSnapshot.flagged_biomarkers.length > 0 && (
+            <div className="mb-3">
+              <div className="text-[9px] uppercase tracking-widest text-amber-400 font-semibold mb-1.5">Elevados / atenção</div>
+              <div className="flex flex-wrap gap-1.5">
+                {biomarkerSnapshot.flagged_biomarkers.map((b, i) => (
+                  <span key={i} className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/25">
+                    {b}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {biomarkerSnapshot.latestLab && (
+            <div className="mb-3">
+              <div className="text-[9px] uppercase tracking-widest text-blue-400 font-semibold mb-1.5">Último exame · {formatDateBR(biomarkerSnapshot.latestLab.date)}</div>
+              <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                {biomarkerSnapshot.latestLab.lipids?.ldl != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">LDL</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.lipids.ldl}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestLab.thyroid?.tsh != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">TSH</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.thyroid.tsh}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestLab.liver?.alt != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">ALT</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.liver.alt}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestLab.liver?.ggt != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">GGT</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.liver.ggt}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestLab.metabolic?.hba1c != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">HbA1c</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.metabolic.hba1c}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestLab.inflammation?.crp != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">hsCRP</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestLab.inflammation.crp}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {biomarkerSnapshot.latestBody && (
+            <div>
+              <div className="text-[9px] uppercase tracking-widest text-emerald-400 font-semibold mb-1.5">
+                Bioimpedância · {formatDateBR(biomarkerSnapshot.latestBody.date)}
+              </div>
+              <div className="grid grid-cols-4 gap-1.5 text-[10px]">
+                {biomarkerSnapshot.latestBody.weight != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">Peso</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestBody.weight}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestBody.bodyFatPct != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">PGC</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestBody.bodyFatPct}%</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestBody.leanMassKg != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">MM</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestBody.leanMassKg}</div>
+                  </div>
+                )}
+                {biomarkerSnapshot.latestBody.visceralFat != null && (
+                  <div className="bg-black/40 rounded-lg px-2 py-1 border border-zinc-800">
+                    <div className="text-zinc-500">Visc</div>
+                    <div className="font-bold text-white">{biomarkerSnapshot.latestBody.visceralFat}</div>
+                  </div>
+                )}
+              </div>
+              {biomarkerSnapshot.bodyCompDelta && biomarkerSnapshot.bodyCompDelta.days && (
+                <div className="text-[9px] text-zinc-500 mt-1.5">
+                  Δ vs primeiro ({biomarkerSnapshot.bodyCompDelta.days}d):
+                  {biomarkerSnapshot.bodyCompDelta.weight_delta != null && ` peso ${biomarkerSnapshot.bodyCompDelta.weight_delta > 0 ? "+" : ""}${biomarkerSnapshot.bodyCompDelta.weight_delta}kg`}
+                  {biomarkerSnapshot.bodyCompDelta.fatPct_delta != null && ` · PGC ${biomarkerSnapshot.bodyCompDelta.fatPct_delta > 0 ? "+" : ""}${biomarkerSnapshot.bodyCompDelta.fatPct_delta}%`}
+                  {biomarkerSnapshot.bodyCompDelta.leanMass_delta != null && ` · MM ${biomarkerSnapshot.bodyCompDelta.leanMass_delta > 0 ? "+" : ""}${biomarkerSnapshot.bodyCompDelta.leanMass_delta}kg`}
+                </div>
+              )}
+            </div>
+          )}
+
+          {supplements && supplements.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-zinc-800/60">
+              <div className="text-[9px] uppercase tracking-widest text-indigo-400 font-semibold mb-1">
+                Stack ({supplements.length})
+              </div>
+              <div className="text-[10px] text-zinc-300">
+                {supplements.map(s => s.name).join(" · ")}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* STRATEGIST — conselho integral em 3 horizontes (on-demand) */}
       <StrategistCard
@@ -6732,7 +6933,8 @@ export default function SystemOS() {
     home: <HomeScreen entries={entries} today={today} protocol={protocol} ai={rules} setTab={setTab} setTodayField={setTodayField} openAISection={openAISection} />,
     check: <Checklist today={today} checklistState={checklistState} setChecklistState={setChecklistStateCompat} protocol={protocol} />,
     log: <Log today={today} protocol={protocol} setTodayField={setTodayField} setTodayFields={setTodayFields} />,
-    copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today} />,
+    copilot: <CopilotTab ai={rules} entries={entries} protocol={protocol} today={today}
+      labs={labs} bodyComp={bodyComp} supplements={supplements} />,
     ai: <AI ai={rules} entries={entries} protocol={protocol} labs={labs} bodyComp={bodyComp} interventions={interventions} initialSection={aiInitialSection} />,
     profile: <Profile protocol={protocol} setProtocol={updateProtocol} labs={labs} bodyComp={bodyComp}
       supplements={supplements} interventions={interventions} entries={entries} setTab={setTab}
